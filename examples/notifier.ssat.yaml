@@ -1,0 +1,26 @@
+name: notifier
+modules:
+  - name: formatter
+    path: slices/notifier/formatter.py
+    imports: []
+    functions:
+      - name: format_message
+        args: ["event: dict"]
+        returns: "str"
+        doc: "Render an event dict into a human-readable notification string."
+  - name: sender
+    path: slices/notifier/sender.py
+    imports: [formatter]
+    functions:
+      - name: send
+        args: ["event: dict", "channel: str"]
+        returns: "bool"
+        doc: "Format then dispatch to a channel. Returns success."
+dependencies:
+  - from: sender
+    to: formatter
+invariants:
+  - name: no_eval
+    forbid_pattern: "\\beval\\("
+  - name: no_hardcoded_secret
+    forbid_pattern: "(?i)api_key\\s*=\\s*['\"]"
