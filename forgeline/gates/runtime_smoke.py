@@ -27,6 +27,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from forgeline.attribution import Attribution, FailureClass, GateResult, UnitResult
 
 
 @dataclass
@@ -62,6 +63,33 @@ class SmokeReport:
 
     def add(self, name, passed, reason, duration_ms=0):
         self.results.append(SmokeResult(name, passed, reason, duration_ms))
+
+    @property
+    def attribution(self) -> Attribution:
+        units = []
+        for result in self.results:
+            failure_class = None
+            reason = result.reason.lower()
+            if not result.passed:
+                if "timed out" in reason:
+                    failure_class = FailureClass.RUNTIME_TIMEOUT
+                elif "expected stdout" in reason:
+                    failure_class = FailureClass.WRONG_OUTPUT
+                else:
+                    failure_class = FailureClass.RUNTIME_CRASH
+            units.append(UnitResult(
+                unit=f"smoke:{result.name}",
+                stage="smoke",
+                passed=result.passed,
+                evidence=result.reason,
+                failure_class=failure_class,
+            ))
+        return Attribution("smoke", len(units), sum(unit.passed for unit in units), units)
+
+    @property
+    def gate_result(self) -> GateResult:
+        attr = self.attribution
+        return GateResult(attr.n_checked > 0 and attr.rate == 1.0, attr)
 
 
 def _load_manifest(root: Path, feature: str) -> list[SmokeCheck] | None:

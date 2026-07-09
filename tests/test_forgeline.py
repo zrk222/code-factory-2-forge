@@ -198,6 +198,16 @@ def test_review_receipt_carries_qa_grade(proj):
     receipts = [json.loads(l) for l in (proj/".forge"/"notifier"/"receipts.jsonl").read_text().splitlines()]
     review_r = [r for r in receipts if r.get("phase")=="review"]
     assert review_r and "qa_grade" in review_r[0] and "qa_metrics" in review_r[0]
+    assert review_r[0]["attribution"]["n_checked"] == 4
+
+
+def test_arch_gate_receipt_has_attribution(proj):
+    o = _to_arch_gated(proj)
+    receipts = [json.loads(line) for line in
+                (proj / ".forge" / "notifier" / "receipts.jsonl").read_text().splitlines()]
+    gate = [item for item in receipts if item.get("phase") == "arch_gate"][-1]
+    assert gate["attribution"]["n_checked"] == 2
+    assert gate["attribution"]["rate"] == 1.0
 
 
 # ============ Intent Thread — PRD->production traceability (v0.3) ============
@@ -301,3 +311,45 @@ def test_ship_requires_smoke_gate(proj):
     # skip smoke, go straight to ship -> refused
     r = o.ship()
     assert r["shipped"] is False and "smoke" in r["reason"].lower()
+
+
+def test_smoke_attribution_is_per_check_and_verdict_derived(proj):
+    from forgeline.gates.runtime_smoke import runtime_smoke
+    smoke = proj / "smoke"
+    smoke.mkdir(exist_ok=True)
+    (smoke / "notifier.json").write_text(json.dumps({"checks": [
+        {"name": "green", "kind": "python", "run": "print('ok')", "expect_stdout": "ok"},
+        {"name": "wrong", "kind": "python", "run": "print('no')", "expect_stdout": "yes"},
+    ]}))
+    report = runtime_smoke(proj, "notifier")
+    gate = report.gate_result
+    assert gate.passed is False
+    assert gate.attribution.n_checked == 2 and gate.attribution.n_passed == 1
+    assert gate.attribution.rate == 0.5
+    assert gate.attribution.failures[0].failure_class.value == "wrong_output"
+    assert "expected stdout" in gate.attribution.failures[0].evidence
+
+
+def test_edit_order_pareto_and_plateau(tmp_path):
+    from forgeline.attribution import FailureClass
+    from forgeline.refinement import pareto_win, refine, select_edit
+    assert select_edit(FailureClass.SIGNATURE_DRIFT).edit_class == "structural"
+    assert pareto_win({"smoke": 1.0, "judge": 1.0},
+                      {"smoke": 0.5, "judge": 1.0}, "smoke")
+    assert not pareto_win({"smoke": 1.0, "judge": 0.5},
+                          {"smoke": 0.5, "judge": 1.0}, "smoke")
+    state = {"rates": {"smoke": 0.5}, "reverts": 0}
+    result = refine(
+        lambda: dict(state["rates"]),
+        lambda rates: ("smoke", FailureClass.RUNTIME_TIMEOUT),
+        lambda edit: b"tree-before",
+        lambda snapshot: state.__setitem__("reverts", state["reverts"] + 1),
+        tmp_path,
+    )
+    assert result["reason"] == "plateau" and result["iters"] == 2
+    assert state["reverts"] == 2
+    lines = (tmp_path / ".forge" / "rejection_ledger.jsonl").read_text().splitlines()
+    assert len(lines) == 2
+    entry = json.loads(lines[0])
+    assert entry["before_rates"]["smoke"] == 0.5
+    assert entry["after_rates"]["smoke"] == 0.5
