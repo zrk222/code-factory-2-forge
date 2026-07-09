@@ -83,7 +83,8 @@ def main(argv=None):
         from .gates.qa_audit import qa_audit
         r = qa_audit(root)
         print(json.dumps({"grade": r.grade, "passed": r.passed, "metrics": r.metrics,
-                          "findings": r.findings}, indent=2))
+                          "findings": r.findings,
+                          "attribution": r.attribution.to_dict()}, indent=2))
         if a.strict and not r.passed:
             raise SystemExit(1)
     elif a.cmd == "lessons":

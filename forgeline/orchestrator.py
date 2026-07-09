@@ -189,12 +189,22 @@ class Orchestrator:
                            checks=len(rep.results), report=lines, attribution=attr)
         return {"smoked": True, "checks": len(rep.results), "attribution": attr}
 
+    def refine(self, evaluate, propose, apply, revert, max_iters: int = 6) -> dict:
+        """Run deterministic localized refinement.
+
+        Callers may propose an edit, but exact Pareto acceptance and rollback are
+        controlled here. Learning state remains build-time only under `.forge/`.
+        """
+        from .refinement import refine
+        return refine(evaluate, propose, apply, revert, self.root, max_iters=max_iters)
+
     def ship(self, verify_intent: bool = True) -> dict:
         # ship now requires runtime behavior to have been verified
         if self.store.state == State.ARCH_GATED:
             return {"shipped": False, "reason": "runtime smoke gate not run — "
                     "call smoke_gate() before ship (behavior must be verified)."}
         trace = None
+        intent_attr = None
         if verify_intent:
             from .intent_thread import verify_against_intent
             trace = verify_against_intent(self.root, self.feature, self.root)
@@ -221,7 +231,9 @@ class Orchestrator:
         self._advance(State.SHIPPED, "all gates green")
         self.store.receipt(phase="ship", shipped=True,
                            intent_hash=(trace.intent_hash if trace else None),
-                           obligations=f"{trace.obligations_met}/{trace.obligations_total}" if trace else None)
+                           obligations=f"{trace.obligations_met}/{trace.obligations_total}" if trace else None,
+                           attribution=intent_attr)
         return {"shipped": True,
                 "intent_traceable": (trace.traceable if trace else None),
-                "obligations_met": (f"{trace.obligations_met}/{trace.obligations_total}" if trace else None)}
+                "obligations_met": (f"{trace.obligations_met}/{trace.obligations_total}" if trace else None),
+                "attribution": intent_attr}

@@ -16,10 +16,39 @@ class QAReport:
     grade: str = "F"
     findings: list = field(default_factory=list)
     metrics: dict = field(default_factory=dict)
+    function_metrics: list = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
         return self.grade in ("A", "B") and self.security_score >= 80
+
+    @property
+    def attribution(self):
+        from ..attribution import Attribution, FailureClass, UnitResult
+        units = []
+        for metric in self.function_metrics:
+            failures = []
+            failure_class = None
+            if metric["complexity"] > 10:
+                failures.append(f"complexity={metric['complexity']}; threshold=10")
+                failure_class = FailureClass.COMPLEXITY_EXCEEDED
+            if not metric["tested"]:
+                failures.append("coverage_intent=0; required=1")
+                failure_class = failure_class or FailureClass.INCONSISTENT_LOGIC
+            units.append(UnitResult(
+                unit=f"qa_audit:{metric['function']}",
+                stage="qa_audit",
+                passed=not failures,
+                evidence="metrics within thresholds" if not failures else "; ".join(failures),
+                failure_class=failure_class,
+            ))
+        if not units:
+            units.append(UnitResult(
+                "qa_audit:<no-public-functions>", "qa_audit", False,
+                "no public functions were available to grade",
+                FailureClass.STUB_UNFILLED,
+            ))
+        return Attribution("qa_audit", len(units), sum(unit.passed for unit in units), units)
 
 def _complexity(node: ast.FunctionDef) -> int:
     """Cyclomatic complexity: 1 + branch points."""
@@ -69,6 +98,12 @@ def qa_audit(src_dir: Path) -> QAReport:
                     documented += 1
                 cx = _complexity(node)
                 complexities.append((node.name, cx))
+                r.function_metrics.append({
+                    "function": f"{p.name}:{node.name}",
+                    "complexity": cx,
+                    "tested": bool(re.search(rf"\b{re.escape(node.name)}\b", all_test_text)),
+                    "documented": bool(ast.get_docstring(node)),
+                })
         # security scan
         text = p.read_text()
         for pat, (sev, deduct, msg) in SEC_PATTERNS.items():

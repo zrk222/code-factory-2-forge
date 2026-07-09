@@ -252,3 +252,14 @@ parallel PRs and human reviewers. The smoke gate captures the core value —
 *verify the artifact runs and behaves before merge* — deterministically, at the
 cost of a subprocess. When team scale justifies it, the manifest model extends
 naturally to spinning real environments; the behavioral contract is already written.
+## Failure attribution and refinement
+
+ForgeLine 0.5 reports review, architecture, QA, smoke, and intent failures at
+their smallest actionable unit. `forge qa --root .` includes function-level
+metrics and attribution in its JSON output.
+
+The refinement engine accepts exactly one proposed edit at a time. Structural
+edits precede configuration and parameter changes. An edit is retained only
+when its targeted stage improves and no other stage regresses; rejected edits
+are reverted and written with before/after rates to
+`.forge/rejection_ledger.jsonl`. Two consecutive non-wins stop the loop.

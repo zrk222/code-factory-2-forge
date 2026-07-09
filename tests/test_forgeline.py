@@ -128,6 +128,7 @@ def test_qa_audit_grades_quality(proj):
     r = qa_audit(proj)
     assert r.grade in ("A","B") and r.passed
     assert r.coverage_intent > 0 and r.doc_ratio > 0
+    assert r.attribution.n_checked > 0
 
 def test_qa_audit_catches_security_and_complexity(proj):
     from forgeline.gates.qa_audit import qa_audit
@@ -353,3 +354,26 @@ def test_edit_order_pareto_and_plateau(tmp_path):
     entry = json.loads(lines[0])
     assert entry["before_rates"]["smoke"] == 0.5
     assert entry["after_rates"]["smoke"] == 0.5
+
+
+def test_orchestrator_refine_reverts_tree_byte_identically(proj):
+    from forgeline.attribution import FailureClass
+    target = proj / "slices" / "target.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"before\n")
+    before = target.read_bytes()
+    orchestrator = Orchestrator(proj, "notifier")
+
+    def apply(edit):
+        snapshot = target.read_bytes()
+        target.write_bytes(b"rejected\n")
+        return snapshot
+
+    result = orchestrator.refine(
+        lambda: {"smoke": 0.5},
+        lambda rates: ("smoke", FailureClass.RUNTIME_TIMEOUT),
+        apply,
+        lambda snapshot: target.write_bytes(snapshot),
+    )
+    assert result["reason"] == "plateau"
+    assert target.read_bytes() == before
