@@ -12,6 +12,7 @@ class State(str, Enum):
     FILLED       = "filled"          # function bodies implemented
     REVIEWED     = "reviewed"        # judge + adversary passed
     ARCH_GATED   = "arch_gated"      # architecture CI gate passed
+    TESTS_VERIFIED = "tests_verified"  # smoke checks proven non-hollow
     SMOKED       = "smoked"          # runtime behavior verified (smoke gate)
     SHIPPED      = "shipped"
     BLOCKED      = "blocked"         # a gate failed; refine loop owns it
@@ -24,9 +25,10 @@ TRANSITIONS = {
     State.SCAFFOLDED:  {State.FILLED, State.BLOCKED},
     State.FILLED:      {State.REVIEWED, State.BLOCKED},
     State.REVIEWED:    {State.ARCH_GATED, State.BLOCKED},
-    State.ARCH_GATED:  {State.SMOKED, State.BLOCKED},
+    State.ARCH_GATED:  {State.TESTS_VERIFIED, State.BLOCKED},
+    State.TESTS_VERIFIED: {State.SMOKED, State.BLOCKED},
     State.SMOKED:      {State.SHIPPED, State.BLOCKED},
-    State.BLOCKED:     {State.SCAFFOLDED, State.FILLED, State.REVIEWED, State.ARCH_GATED, State.SMOKED},
+    State.BLOCKED:     {State.SCAFFOLDED, State.FILLED, State.REVIEWED, State.ARCH_GATED, State.TESTS_VERIFIED, State.SMOKED},
     State.SHIPPED:     set(),
 }
 

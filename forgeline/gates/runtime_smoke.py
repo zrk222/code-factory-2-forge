@@ -38,6 +38,7 @@ class SmokeCheck:
     expect_exit: int = 0
     expect_stdout: str | None = None   # substring that must appear
     timeout_s: int = 30
+    must_fail_on_stub: bool = True
 
 
 @dataclass
@@ -115,6 +116,7 @@ def _load_manifest(root: Path, feature: str) -> list[SmokeCheck] | None:
                     expect_exit=entry.get("expect_exit", 0),
                     expect_stdout=entry.get("expect_stdout"),
                     timeout_s=entry.get("timeout_s", 30),
+                    must_fail_on_stub=entry.get("must_fail_on_stub", True),
                 ))
             return checks
     return None

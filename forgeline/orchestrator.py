@@ -161,13 +161,13 @@ class Orchestrator:
         right-sized version of a per-PR preview deployment: verify the thing RUNS
         and behaves, not just that it type-checks and honors the spec."""
         from .gates.runtime_smoke import runtime_smoke, smoke_report_lines
-        # must be ARCH_GATED to legally smoke
         if self.store.state == State.SHIPPED:
             return {"smoked": True, "note": "already shipped"}
-        if self.store.state != State.ARCH_GATED:
-            if self.store.state == State.SMOKED:
-                return {"smoked": True, "note": "already smoked"}
-            self.store.set_state(State.ARCH_GATED, "recovered for smoke gate")
+        if self.store.state == State.SMOKED:
+            return {"smoked": True, "note": "already smoked"}
+        if self.store.state != State.TESTS_VERIFIED:
+            return {"smoked": False,
+                    "reason": "tests not verified - run `forge verify-tests` first"}
         rep = runtime_smoke(self.root, self.feature)
         gate = rep.gate_result
         attr = gate.attribution.to_dict()
@@ -189,6 +189,30 @@ class Orchestrator:
                            checks=len(rep.results), report=lines, attribution=attr)
         return {"smoked": True, "checks": len(rep.results), "attribution": attr}
 
+    def verify_tests(self, ssat_path: Path) -> dict:
+        """Verify smoke checks can fail before trusting smoke results."""
+        from .gates.reverse_classical import verify_tests
+        if self.store.state == State.SHIPPED:
+            return {"verified": True, "note": "already shipped"}
+        if self.store.state in {State.TESTS_VERIFIED, State.SMOKED}:
+            return {"verified": True, "note": "already verified"}
+        if self.store.state not in {State.ARCH_GATED, State.BLOCKED}:
+            return {"verified": False,
+                    "reason": "architecture gate not passed - run `forge arch-gate` first"}
+        gate = verify_tests(self.root, self.feature, Path(ssat_path))
+        attr = gate.attribution.to_dict()
+        if not gate.passed:
+            self.store.receipt(phase="verify_tests", verified=False, attribution=attr)
+            if self.store.state != State.BLOCKED:
+                self._advance(State.BLOCKED, "reverse-classical test verification failed")
+            return {"verified": False,
+                    "reason": "hollow smoke check(s) found",
+                    "attribution": attr}
+        self._advance(State.TESTS_VERIFIED, "smoke checks proven non-hollow",
+                      attribution=attr)
+        self.store.receipt(phase="verify_tests", verified=True, attribution=attr)
+        return {"verified": True, "checks": gate.attribution.n_checked, "attribution": attr}
+
     def refine(self, evaluate, propose, apply, revert, max_iters: int = 6) -> dict:
         """Run deterministic localized refinement.
 
@@ -200,8 +224,8 @@ class Orchestrator:
 
     def ship(self, verify_intent: bool = True) -> dict:
         # ship now requires runtime behavior to have been verified
-        if self.store.state == State.ARCH_GATED:
-            return {"shipped": False, "reason": "runtime smoke gate not run — "
+        if self.store.state in {State.ARCH_GATED, State.TESTS_VERIFIED}:
+            return {"shipped": False, "reason": "runtime smoke gate not run - "
                     "call smoke_gate() before ship (behavior must be verified)."}
         trace = None
         intent_attr = None

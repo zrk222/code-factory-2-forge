@@ -1,4 +1,5 @@
 import json
+import hashlib
 from pathlib import Path
 import pytest
 from forgeline.states import State, can_transition, IllegalTransition
@@ -80,6 +81,7 @@ def test_full_happy_path_intent_to_ship(proj):
     g = o.arch_gate(proj/"notifier.ssat.yaml")
     assert g["passed"] and o.store.state == State.ARCH_GATED
     write_smoke_manifest(proj)
+    assert o.verify_tests(proj/"notifier.ssat.yaml")["verified"] and o.store.state == State.TESTS_VERIFIED
     assert o.smoke_gate()["smoked"] and o.store.state == State.SMOKED
     assert o.ship()["shipped"] and o.store.state == State.SHIPPED
 
@@ -257,7 +259,7 @@ def test_ship_blocks_on_intent_gap(proj):
     (proj/"envelopes"/"notifier.json").write_text(json.dumps({
         "sealed_hash": "x", "coherence_score": 90,
         "assumptions": ["Assumes external dependency availability (integration referenced)."]}))
-    write_smoke_manifest(proj); o.smoke_gate()
+    write_smoke_manifest(proj); o.verify_tests(proj/"notifier.ssat.yaml"); o.smoke_gate()
     r = o.ship()
     assert r["shipped"] is False and r["unverified_assumptions"]
 
@@ -268,7 +270,7 @@ def test_ship_succeeds_when_intent_honored(proj):
     o.store.set_state(State.ARCHITECTED); o.architect(proj/"notifier.ssat.yaml")
     fill_good(proj); o.store.set_state(State.FILLED)
     o.review(proj/"notifier.ssat.yaml"); o.arch_gate(proj/"notifier.ssat.yaml")
-    write_smoke_manifest(proj); o.smoke_gate()
+    write_smoke_manifest(proj); o.verify_tests(proj/"notifier.ssat.yaml"); o.smoke_gate()
     r = o.ship()  # no envelope -> ships (traceability opt-in), or with met obligations
     assert r["shipped"] is True
 
@@ -284,24 +286,38 @@ def _to_arch_gated(proj):
     o.review(proj/"notifier.ssat.yaml"); o.arch_gate(proj/"notifier.ssat.yaml")
     return o
 
+def _to_tests_verified(proj):
+    o = _to_arch_gated(proj)
+    write_smoke_manifest(proj)
+    assert o.verify_tests(proj/"notifier.ssat.yaml")["verified"] is True
+    return o
+
+def _file_hashes(root: Path) -> dict[str, str]:
+    hashes = {}
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        rel = path.relative_to(root).as_posix()
+        hashes[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return hashes
+
 def test_smoke_gate_passes_on_green_check(proj):
     from forgeline.states import State
-    o = _to_arch_gated(proj)
-    write_smoke_manifest(proj, passing=True)
+    o = _to_tests_verified(proj)
     r = o.smoke_gate()
     assert r["smoked"] is True and o.store.state == State.SMOKED
 
 def test_smoke_gate_blocks_on_missing_manifest(proj):
     from forgeline.states import State
     o = _to_arch_gated(proj)
-    # no manifest written -> fail-closed
     r = o.smoke_gate()
-    assert r["smoked"] is False and o.store.state == State.BLOCKED
+    assert r["smoked"] is False
+    assert "verify-tests" in r["reason"]
+    assert o.store.state == State.ARCH_GATED
 
 def test_smoke_gate_blocks_on_runtime_failure(proj):
     from forgeline.states import State
     o = _to_arch_gated(proj)
     write_smoke_manifest(proj, passing=False)   # asserts wrong result -> nonzero exit
+    assert o.verify_tests(proj/"notifier.ssat.yaml")["verified"] is True
     r = o.smoke_gate()
     assert r["smoked"] is False and o.store.state == State.BLOCKED
     assert r["failures"]
@@ -312,6 +328,176 @@ def test_ship_requires_smoke_gate(proj):
     # skip smoke, go straight to ship -> refused
     r = o.ship()
     assert r["shipped"] is False and "smoke" in r["reason"].lower()
+
+
+def test_verify_tests_passes_real_behavioral_check(proj):
+    from forgeline.states import State
+    o = _to_arch_gated(proj)
+    write_smoke_manifest(proj, passing=True)
+    r = o.verify_tests(proj/"notifier.ssat.yaml")
+    assert r["verified"] is True
+    assert o.store.state == State.TESTS_VERIFIED
+    assert r["attribution"]["rate"] == 1.0
+
+
+def test_verify_tests_catches_assert_true_hollow_check(proj):
+    from forgeline.states import State
+    o = _to_arch_gated(proj)
+    smoke = proj / "smoke"
+    smoke.mkdir(exist_ok=True)
+    (smoke / "notifier.json").write_text(json.dumps({"checks": [{
+        "name": "assert_true",
+        "kind": "python",
+        "run": "assert True\nprint('OK')",
+        "expect_stdout": "OK",
+    }]}))
+    r = o.verify_tests(proj/"notifier.ssat.yaml")
+    assert r["verified"] is False
+    assert o.store.state == State.BLOCKED
+    assert r["attribution"]["dominant_failure_class"] == "hollow_test"
+
+
+def test_verify_tests_catches_trivially_true_assertion(proj):
+    o = _to_arch_gated(proj)
+    smoke = proj / "smoke"
+    smoke.mkdir(exist_ok=True)
+    (smoke / "notifier.json").write_text(json.dumps({"checks": [{
+        "name": "assert_math",
+        "kind": "python",
+        "run": "assert 1 == 1",
+    }]}))
+    r = o.verify_tests(proj/"notifier.ssat.yaml")
+    assert r["verified"] is False
+    assert r["attribution"]["units"][0]["failure_class"] == "hollow_test"
+
+
+def test_verify_tests_honors_structural_exemption(proj):
+    o = _to_arch_gated(proj)
+    smoke = proj / "smoke"
+    smoke.mkdir(exist_ok=True)
+    (smoke / "notifier.json").write_text(json.dumps({"checks": [
+        {
+            "name": "formatter_behavior",
+            "kind": "python",
+            "run": (
+                "import sys; sys.path.insert(0, '.')\n"
+                "from slices.notifier.formatter import format_message\n"
+                "assert format_message({'kind':'ping','text':'hi'}) == 'ping: hi'\n"
+            ),
+        },
+        {
+            "name": "module_imports",
+            "kind": "python",
+            "run": "import sys; sys.path.insert(0, '.')\nimport slices.notifier.formatter\n",
+            "must_fail_on_stub": False,
+        },
+    ]}))
+    r = o.verify_tests(proj/"notifier.ssat.yaml")
+    assert r["verified"] is True
+    evidence = [unit["evidence"] for unit in r["attribution"]["units"]]
+    assert any("exempt" in item for item in evidence)
+
+
+def test_verify_tests_absent_field_defaults_strict(proj):
+    o = _to_arch_gated(proj)
+    smoke = proj / "smoke"
+    smoke.mkdir(exist_ok=True)
+    (smoke / "notifier.json").write_text(json.dumps({"checks": [{
+        "name": "quietly_unmarked",
+        "kind": "python",
+        "run": "print('OK')",
+        "expect_stdout": "OK",
+    }]}))
+    r = o.verify_tests(proj/"notifier.ssat.yaml")
+    assert r["verified"] is False
+    assert r["attribution"]["dominant_failure_class"] == "hollow_test"
+
+
+def test_verify_tests_all_exempt_manifest_blocks(proj):
+    o = _to_arch_gated(proj)
+    smoke = proj / "smoke"
+    smoke.mkdir(exist_ok=True)
+    (smoke / "notifier.json").write_text(json.dumps({"checks": [{
+        "name": "module_imports",
+        "kind": "python",
+        "run": "import slices.notifier.formatter",
+        "must_fail_on_stub": False,
+    }]}))
+    r = o.verify_tests(proj/"notifier.ssat.yaml")
+    assert r["verified"] is False
+    assert r["attribution"]["dominant_failure_class"] == "hollow_manifest"
+
+
+def test_verify_tests_missing_and_empty_manifest_block(proj):
+    o = _to_arch_gated(proj)
+    missing = o.verify_tests(proj/"notifier.ssat.yaml")
+    assert missing["verified"] is False
+    assert missing["attribution"]["dominant_failure_class"] == "hollow_manifest"
+
+    o.store.set_state(State.ARCH_GATED)
+    smoke = proj / "smoke"
+    smoke.mkdir(exist_ok=True)
+    (smoke / "notifier.json").write_text(json.dumps({"checks": []}))
+    empty = o.verify_tests(proj/"notifier.ssat.yaml")
+    assert empty["verified"] is False
+    assert empty["attribution"]["dominant_failure_class"] == "hollow_manifest"
+
+
+def test_smoke_requires_tests_verified_state(proj):
+    o = _to_arch_gated(proj)
+    write_smoke_manifest(proj)
+    r = o.smoke_gate()
+    assert r["smoked"] is False
+    assert "verify-tests" in r["reason"]
+    assert o.store.state == State.ARCH_GATED
+
+
+def test_arch_gated_to_smoked_is_illegal_transition():
+    assert not can_transition(State.ARCH_GATED, State.SMOKED)
+
+
+def test_verify_tests_does_not_touch_working_tree(proj):
+    o = _to_arch_gated(proj)
+    write_smoke_manifest(proj)
+    target = proj / "slices" / "notifier"
+    before = _file_hashes(target)
+    assert o.verify_tests(proj/"notifier.ssat.yaml")["verified"] is True
+    assert _file_hashes(target) == before
+
+
+def test_materialized_stub_is_deterministic_and_identical_to_scaffold(proj, tmp_path):
+    from forgeline.gates.reverse_classical import materialize_stub_root
+    from forgeline.ssat import load_ssat, scaffold_from_ssat
+
+    ssat_path = proj / "notifier.ssat.yaml"
+    first = materialize_stub_root(ssat_path)
+    second = materialize_stub_root(ssat_path)
+    expected = tmp_path / "expected"
+    scaffold_from_ssat(load_ssat(ssat_path), expected)
+    try:
+        assert _file_hashes(first) == _file_hashes(second)
+        assert _file_hashes(first) == _file_hashes(expected)
+    finally:
+        import shutil
+        shutil.rmtree(first, ignore_errors=True)
+        shutil.rmtree(second, ignore_errors=True)
+
+
+def test_verify_tests_temp_root_is_cleaned_up(proj):
+    import tempfile
+    o = _to_arch_gated(proj)
+    write_smoke_manifest(proj)
+    tmp = Path(tempfile.gettempdir())
+    before = {path for path in tmp.glob("forge-stub-*")}
+    assert o.verify_tests(proj/"notifier.ssat.yaml")["verified"] is True
+    after = {path for path in tmp.glob("forge-stub-*")}
+    assert after == before
+
+
+def test_hollow_test_maps_to_structural_edit():
+    from forgeline.attribution import FailureClass
+    from forgeline.refinement import select_edit
+    assert select_edit(FailureClass.HOLLOW_TEST).edit_class == "structural"
 
 
 def test_smoke_attribution_is_per_check_and_verdict_derived(proj):

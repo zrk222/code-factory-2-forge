@@ -19,6 +19,8 @@ STRUCTURAL_FAILURES = {
     FailureClass.STUB_UNFILLED,
     FailureClass.INCONSISTENT_LOGIC,
     FailureClass.SCOPE_ESCAPE,
+    FailureClass.HOLLOW_TEST,
+    FailureClass.HOLLOW_MANIFEST,
 }
 
 

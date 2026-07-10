@@ -26,8 +26,9 @@ flowchart LR
     G -->|"findings"| H["Refine and record lesson"]
     H --> F
     G -->|"pass"| I["Architecture CI gate"]
-    I --> J["Runtime smoke gate"]
-    J --> K["Ship with receipt"]
+    I --> J["Reverse-classical test verification"]
+    J --> K["Runtime smoke gate"]
+    K --> L["Ship with receipt"]
 ```
 
 ```
@@ -126,6 +127,8 @@ forge expand <feature>              draft use cases (→ human gate)
 forge architect <feature> <ssat>    generate scaffold from architecture-as-code
 forge review <feature> <ssat>       judge + grumpy adversary + arch erosion (refine loop)
 forge arch-gate <feature> <ssat>    architecture CI gate
+forge verify-tests <feature> <ssat>  prove smoke checks fail on generated stubs
+forge smoke <feature>                runtime behavior gate
 forge ship <feature>                seal it
 forge handoff <feature> <spec>      route decision tables to HSF
 forge lessons                       show the skill memory + promotable constraints
@@ -252,6 +255,31 @@ parallel PRs and human reviewers. The smoke gate captures the core value —
 *verify the artifact runs and behaves before merge* — deterministically, at the
 cost of a subprocess. When team scale justifies it, the manifest model extends
 naturally to spinning real environments; the behavioral contract is already written.
+## v0.6 - Reverse-Classical test verification
+
+ForgeLine now refuses tests that prove nothing.
+
+`forge verify-tests <feature> <ssat.yaml>` regenerates the SSAT scaffold into an
+isolated temp root and runs every behavioral smoke check against those empty
+stubs. Each behavioral check must fail on the stub before ForgeLine trusts it
+against the real implementation. A check that passes against an empty stub is
+classified as `HOLLOW_TEST` and blocks the feature.
+
+The ordering is now:
+
+```text
+... -> reviewed -> arch_gated -> tests_verified -> smoked -> shipped
+```
+
+Structural checks such as imports may declare `"must_fail_on_stub": false` in
+`smoke/<feature>.json`, but the field defaults to `true`. Omission never buys
+leniency, and a manifest where every check is exempt blocks as
+`HOLLOW_MANIFEST`.
+
+This gate is deterministic: no model, no git snapshot, no new runtime service.
+It reuses the same SSAT scaffold generator as the normal `SCAFFOLDED` state, so
+the mutant is the real generated stub.
+
 ## Failure attribution and refinement
 
 ForgeLine 0.5 reports review, architecture, QA, smoke, and intent failures at

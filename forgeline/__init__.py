@@ -6,9 +6,9 @@ a generate -> adversarial-review -> refine loop, enforcing architecture as a
 hard CI gate, and learning from every run via an evolving skill memory.
 
   INTENT -> EXPAND -> ARCHITECT(SSAT) -> SCAFFOLD -> FILL
-         -> JUDGE + ADVERSARY(grumpy) -> ARCH-GATE -> SHIP
+         -> JUDGE + ADVERSARY(grumpy) -> ARCH-GATE -> VERIFY-TESTS -> SMOKE -> SHIP
                          ^                              |
                          └──────── refine loop ─────────┘
                                    skill memory learns each pass
 """
-__version__ = "0.1.0"
+__version__ = "0.6.0"

@@ -13,7 +13,8 @@ NEXT_ACTION = {
     State.SCAFFOLDED: "implement function bodies + tests, then: forge review <feature> <ssat.yaml>",
     State.FILLED: "forge review <feature> <ssat.yaml>",
     State.REVIEWED: "forge arch-gate <feature> <ssat.yaml>",
-    State.ARCH_GATED: "forge smoke <feature>",
+    State.ARCH_GATED: "forge verify-tests <feature> <ssat.yaml>",
+    State.TESTS_VERIFIED: "forge smoke <feature>",
     State.SMOKED: "forge ship <feature>",
     State.BLOCKED: "read lessons, fix, then re-run the failed gate",
     State.SHIPPED: "done ✓",
@@ -22,10 +23,10 @@ NEXT_ACTION = {
 def main(argv=None):
     p = argparse.ArgumentParser(prog="forge", description="ForgeLine — autonomous software factory outer loop")
     sub = p.add_subparsers(required=True, dest="cmd")
-    for name in ["init","status","expand","architect","review","arch-gate","smoke","ship","handoff","agent","lessons","policy","qa","demo","demo-learning"]:
+    for name in ["init","status","expand","architect","review","arch-gate","verify-tests","smoke","ship","handoff","agent","lessons","policy","qa","demo","demo-learning"]:
         sp = sub.add_parser(name)
         if name == "init": sp.add_argument("--root", default=".")
-        elif name in {"architect","review","arch-gate"}:
+        elif name in {"architect","review","arch-gate","verify-tests"}:
             sp.add_argument("feature"); sp.add_argument("ssat", nargs="?"); sp.add_argument("--root", default=".")
         elif name == "agent": sp.add_argument("name"); sp.add_argument("--root", default=".")
         elif name == "handoff": sp.add_argument("feature"); sp.add_argument("spec"); sp.add_argument("--root", default=".")
@@ -62,6 +63,8 @@ def main(argv=None):
         print(json.dumps(Orchestrator(root, a.feature).review(Path(a.ssat)), indent=2))
     elif a.cmd == "arch-gate":
         print(json.dumps(Orchestrator(root, a.feature).arch_gate(Path(a.ssat)), indent=2))
+    elif a.cmd == "verify-tests":
+        print(json.dumps(Orchestrator(root, a.feature).verify_tests(Path(a.ssat)), indent=2))
     elif a.cmd == "smoke":
         print(json.dumps(Orchestrator(root, a.feature).smoke_gate(), indent=2))
     elif a.cmd == "ship":

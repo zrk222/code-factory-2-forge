@@ -19,8 +19,9 @@ state machine:
    - FILLED: implement ONLY function bodies; never change signatures; write tests.
    - REVIEWED: run `forge review <feature> <ssat.yaml>`. If it fails, read the
      `lessons_for_next` block it prints and fix — do not argue with the adversary.
-   - ARCH_GATED: run `forge arch-gate <feature> <ssat.yaml>`.
-   - SHIPPED: run `forge ship <feature>`.
+   - ARCH_GATED: run `forge verify-tests <feature> <ssat.yaml>`.
+   - TESTS_VERIFIED: run `forge smoke <feature>`.
+   - SMOKED: run `forge ship <feature>`.
 3. Between phases your context resets. The disk + `forge status` are the truth.
 4. Decision logic (ordered business rules) is NEVER coded inline — it routes to
    the Harness Software Factory via the spec's decision table.
