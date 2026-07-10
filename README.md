@@ -58,8 +58,21 @@ forge demo                 # 60-sec: watch it catch its own bad output, learn, s
 forge init
 forge agent claude         # wire your agent (see full list below)
 forge status <feature>     # the state machine names the ONE next action
+forge optimize-pr <feature> # bounded PR hardening loop plan
 pytest -q                  # 29 tests
 ```
+
+## PR hardening loop
+
+`forge optimize-pr <feature>` is the senior-engineer review loop in executable
+form. It reads the current diff, flags paths that require approval, recommends
+the QA/lesson/factory evidence commands, and fixes the stop conditions up
+front: ready, blocked, approval required, exhausted after five iterations, or
+stagnated after no improvement.
+
+ForgeLine still does not merge, publish, deploy, or send external messages by
+itself. The loop makes one reversible change at a time, verifies with receipts,
+and hands the final proof bundle to Factoryline for `factory pr-pack`.
 
 ## Works with every major coding agent
 

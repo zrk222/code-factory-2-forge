@@ -563,3 +563,14 @@ def test_orchestrator_refine_reverts_tree_byte_identically(proj):
     )
     assert result["reason"] == "plateau"
     assert target.read_bytes() == before
+
+
+def test_optimize_pr_has_bounded_loop_and_approval_boundary(proj, monkeypatch):
+    from forgeline import pr_optimizer
+
+    monkeypatch.setattr(pr_optimizer, "_changed", lambda root, base: ["src/auth/login.py", "README.md"])
+    plan = pr_optimizer.optimize_pr(proj, "notifier")
+    assert plan["loop"]["max_iterations"] == 5
+    assert plan["approval_required"] is True
+    assert "src/auth/login.py" in plan["risky_paths"]
+    assert "factory pr-pack notifier" in plan["commands"]

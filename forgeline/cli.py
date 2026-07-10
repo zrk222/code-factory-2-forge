@@ -23,7 +23,7 @@ NEXT_ACTION = {
 def main(argv=None):
     p = argparse.ArgumentParser(prog="forge", description="ForgeLine — autonomous software factory outer loop")
     sub = p.add_subparsers(required=True, dest="cmd")
-    for name in ["init","status","expand","architect","review","arch-gate","verify-tests","smoke","ship","handoff","agent","lessons","policy","qa","demo","demo-learning"]:
+    for name in ["init","status","expand","architect","review","arch-gate","verify-tests","smoke","ship","handoff","agent","lessons","policy","qa","optimize-pr","demo","demo-learning"]:
         sp = sub.add_parser(name)
         if name == "init": sp.add_argument("--root", default=".")
         elif name in {"architect","review","arch-gate","verify-tests"}:
@@ -33,6 +33,7 @@ def main(argv=None):
         elif name == "lessons": sp.add_argument("--root", default=".")
         elif name == "policy": sp.add_argument("--root", default=".")
         elif name == "qa": sp.add_argument("--root", default="."); sp.add_argument("--strict", action="store_true")
+        elif name == "optimize-pr": sp.add_argument("feature", nargs="?"); sp.add_argument("--root", default="."); sp.add_argument("--base", default="main")
         elif name == "demo": pass
         elif name == "demo-learning": pass
         elif name == "demo-learning": pass
@@ -90,6 +91,9 @@ def main(argv=None):
                           "attribution": r.attribution.to_dict()}, indent=2))
         if a.strict and not r.passed:
             raise SystemExit(1)
+    elif a.cmd == "optimize-pr":
+        from .pr_optimizer import optimize_pr
+        print(json.dumps(optimize_pr(root, a.feature, base=a.base), indent=2))
     elif a.cmd == "lessons":
         from .skill_memory import lessons_for, promotable_constraints
         alll = []
