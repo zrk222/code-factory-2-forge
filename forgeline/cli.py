@@ -10,7 +10,7 @@ NEXT_ACTION = {
     State.INTENT: "forge expand <feature>  (draft use cases, then human signoff)",
     State.EXPANDED: "write/refine the SSAT, then: forge gate architected <feature>",
     State.ARCHITECTED: "forge architect <feature> <ssat.yaml>  (generate scaffold)",
-    State.SCAFFOLDED: "implement function bodies + tests, then: forge review <feature> <ssat.yaml>",
+    State.SCAFFOLDED: "implement function bodies + tests, then: forge fill <feature> <ssat.yaml>",
     State.FILLED: "forge review <feature> <ssat.yaml>",
     State.REVIEWED: "forge arch-gate <feature> <ssat.yaml>",
     State.ARCH_GATED: "forge verify-tests <feature> <ssat.yaml>",
@@ -23,11 +23,15 @@ NEXT_ACTION = {
 def main(argv=None):
     p = argparse.ArgumentParser(prog="forge", description="ForgeLine — autonomous software factory outer loop")
     sub = p.add_subparsers(required=True, dest="cmd")
-    for name in ["init","status","expand","architect","review","arch-gate","verify-tests","smoke","ship","handoff","agent","lessons","policy","qa","optimize-pr","demo","demo-learning"]:
+    for name in ["init","status","expand","gate","architect","fill","review","arch-gate","verify-tests","challenge","smoke","ship","handoff","agent","lessons","policy","qa","optimize-pr","demo","demo-learning"]:
         sp = sub.add_parser(name)
         if name == "init": sp.add_argument("--root", default=".")
-        elif name in {"architect","review","arch-gate","verify-tests"}:
+        elif name in {"architect","fill","review","arch-gate","verify-tests"}:
             sp.add_argument("feature"); sp.add_argument("ssat", nargs="?"); sp.add_argument("--root", default=".")
+        elif name == "gate":
+            sp.add_argument("phase", choices=["architected"]); sp.add_argument("feature"); sp.add_argument("--root", default=".")
+        elif name == "challenge":
+            sp.add_argument("feature"); sp.add_argument("ssat"); sp.add_argument("--root", default="."); sp.add_argument("--out", default=None)
         elif name == "agent": sp.add_argument("name"); sp.add_argument("--root", default=".")
         elif name == "handoff": sp.add_argument("feature"); sp.add_argument("spec"); sp.add_argument("--root", default=".")
         elif name == "lessons": sp.add_argument("--root", default=".")
@@ -54,18 +58,45 @@ def main(argv=None):
         s = RunStore(root, a.feature); s.set_state(State.EXPANDED, "use cases drafted")
         s.receipt(phase="expand", note="awaiting human signoff")
         print(f"{a.feature}: EXPANDED — human confidence gate. After signoff: forge gate architected")
+    elif a.cmd == "gate":
+        result = Orchestrator(root, a.feature).approve_architecture()
+        print(json.dumps(result, indent=2))
+        if not result["approved"]:
+            raise SystemExit(1)
     elif a.cmd == "architect":
         o = Orchestrator(root, a.feature)
-        # allow arriving from EXPANDED via implicit architected signoff for demo simplicity
-        if o.store.state == State.EXPANDED:
-            o.store.set_state(State.ARCHITECTED, "ssat approved")
         print(json.dumps(o.architect(Path(a.ssat)), indent=2))
+    elif a.cmd == "fill":
+        result = Orchestrator(root, a.feature).fill(Path(a.ssat))
+        print(json.dumps(result, indent=2))
+        if not result["filled"]:
+            raise SystemExit(1)
     elif a.cmd == "review":
         print(json.dumps(Orchestrator(root, a.feature).review(Path(a.ssat)), indent=2))
     elif a.cmd == "arch-gate":
         print(json.dumps(Orchestrator(root, a.feature).arch_gate(Path(a.ssat)), indent=2))
     elif a.cmd == "verify-tests":
         print(json.dumps(Orchestrator(root, a.feature).verify_tests(Path(a.ssat)), indent=2))
+    elif a.cmd == "challenge":
+        from .gates.reverse_classical import verify_tests
+        gate = verify_tests(root, a.feature, Path(a.ssat))
+        attr = gate.attribution.to_dict()
+        payload = {
+            "schema": "factory.challenge.v1",
+            "brick": "forgeline",
+            "feature": a.feature,
+            "stage": "verify_tests",
+            "passed": gate.passed and attr["n_checked"] > 0,
+            "mutants_total": attr["n_checked"],
+            "mutants_killed": attr["n_passed"],
+            "attribution": attr,
+        }
+        out = Path(a.out) if a.out else root / ".forge" / a.feature / "challenge.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        print(json.dumps(payload | {"receipt_path": str(out)}, indent=2))
+        if not payload["passed"]:
+            raise SystemExit(1)
     elif a.cmd == "smoke":
         print(json.dumps(Orchestrator(root, a.feature).smoke_gate(), indent=2))
     elif a.cmd == "ship":

@@ -137,10 +137,13 @@ forge init                          scaffold the factory
 forge agent claude|codex            wire the entry-point skill
 forge status <feature>              current state + the ONE next action
 forge expand <feature>              draft use cases (→ human gate)
+forge gate architected <feature>    record explicit architecture approval
 forge architect <feature> <ssat>    generate scaffold from architecture-as-code
+forge fill <feature> <ssat>         prove bodies are implemented; enter FILLED
 forge review <feature> <ssat>       judge + grumpy adversary + arch erosion (refine loop)
 forge arch-gate <feature> <ssat>    architecture CI gate
 forge verify-tests <feature> <ssat>  prove smoke checks fail on generated stubs
+forge challenge <feature> <ssat>     write a Factory Passport challenge receipt
 forge smoke <feature>                runtime behavior gate
 forge ship <feature>                seal it
 forge handoff <feature> <spec>      route decision tables to HSF
@@ -189,13 +192,15 @@ cycle in 15 seconds.
 (normal → elevated "fix all findings" → final "human review required") instead
 of a flat retry cap.
 
-## The three-repo factory
+## The five-brick factory
 
 | Repo | Tier | Owns |
 |---|---|---|
+| **FactoryLine** | proof baseplate | protocol compatibility, traces, passports, challenge aggregation |
 | **ForgeLine** | outer loop | intent→ship state machine, adversarial gates, skill flywheel, arch-as-CI |
 | **SpecLine** | spec governance | EARS specs, atomic task packets, token-lean context, intent-drift guard |
 | **HSF** | decision compiler | ordered business rules → gated deterministic code, zero tokens/decision |
+| **Prestige** | design proof | Visual DNA, source audit, rendered desktop/mobile evidence |
 
 Same doctrine at every tier: gate everything, receipts or it didn't happen,
 compile what shouldn't be reasoned twice.
@@ -304,3 +309,5 @@ edits precede configuration and parameter changes. An edit is retained only
 when its targeted stage improves and no other stage regresses; rejected edits
 are reverted and written with before/after rates to
 `.forge/rejection_ledger.jsonl`. Two consecutive non-wins stop the loop.
+[![CI](https://github.com/zrk222/code-factory-2-forge/actions/workflows/ci.yaml/badge.svg)](https://github.com/zrk222/code-factory-2-forge/actions/workflows/ci.yaml)
+[![PyPI](https://img.shields.io/pypi/v/code-factory-2-forge.svg)](https://pypi.org/project/code-factory-2-forge/)

@@ -42,6 +42,31 @@ class Orchestrator:
         self.store.set_state(to, note)
         self.store.receipt(transition=f"{frm.value}->{to.value}", **receipt)
 
+    def approve_architecture(self) -> dict:
+        """Record the explicit human confidence gate before scaffolding."""
+        if self.store.state != State.EXPANDED:
+            return {"approved": False, "reason": f"expected expanded, got {self.store.state.value}"}
+        self._advance(State.ARCHITECTED, "architecture approved by CLI operator", approver="human")
+        return {"approved": True, "state": State.ARCHITECTED.value}
+
+    def fill(self, ssat_path: Path) -> dict:
+        """Verify implemented bodies and advance the previously unreachable FILLED state."""
+        if self.store.state not in {State.SCAFFOLDED, State.BLOCKED}:
+            return {"filled": False, "reason": f"expected scaffolded or blocked, got {self.store.state.value}"}
+        ssat = load_ssat(ssat_path)
+        ok, findings = judge_consistency(ssat, self.root)
+        attr = _gate_attribution("fill", [
+            ("implementation", ok, "all declared bodies implemented" if ok else " | ".join(findings),
+             FailureClass.STUB_UNFILLED),
+        ])
+        self.store.receipt(phase="fill", passed=ok, findings=findings, attribution=attr)
+        if not ok:
+            if self.store.state != State.BLOCKED:
+                self._advance(State.BLOCKED, "fill verification failed")
+            return {"filled": False, "findings": findings, "attribution": attr}
+        self._advance(State.FILLED, "implemented bodies verified", attribution=attr)
+        return {"filled": True, "attribution": attr}
+
     def architect(self, ssat_path: Path) -> dict:
         ssat = load_ssat(ssat_path)
         created = scaffold_from_ssat(ssat, self.root)

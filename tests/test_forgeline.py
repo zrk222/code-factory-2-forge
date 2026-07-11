@@ -13,6 +13,26 @@ def test_state_machine_rejects_illegal_transitions():
     assert not can_transition(State.INTENT, State.SHIPPED)
     assert not can_transition(State.SCAFFOLDED, State.SHIPPED)
 
+
+def test_cli_reachable_architecture_and_fill_states(proj):
+    o = Orchestrator(proj, "notifier")
+    o.store.set_state(State.EXPANDED)
+    assert o.approve_architecture()["approved"] is True
+    o.architect(proj / "notifier.ssat.yaml")
+    fill_good(proj)
+    result = o.fill(proj / "notifier.ssat.yaml")
+    assert result["filled"] is True
+    assert o.store.state == State.FILLED
+
+
+def test_fill_blocks_unimplemented_scaffold(proj):
+    o = Orchestrator(proj, "notifier")
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    result = o.fill(proj / "notifier.ssat.yaml")
+    assert result["filled"] is False
+    assert o.store.state == State.BLOCKED
+
 def test_run_store_persists_state_and_receipts(proj):
     s = RunStore(proj, "notifier")
     assert s.state == State.INTENT
