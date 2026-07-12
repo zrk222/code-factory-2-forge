@@ -134,6 +134,7 @@ agent never free-codes; it advances a state machine. That's the whole point.
 
 ```
 forge init                          scaffold the factory
+forge adopt <feature> --root .      inspect an existing repo and write a reviewable baseline
 forge agent claude|codex            wire the entry-point skill
 forge status <feature>              current state + the ONE next action
 forge expand <feature>              draft use cases (→ human gate)
@@ -143,6 +144,7 @@ forge fill <feature> <ssat>         prove bodies are implemented; enter FILLED
 forge review <feature> <ssat>       judge + grumpy adversary + arch erosion (refine loop)
 forge arch-gate <feature> <ssat>    architecture CI gate
 forge verify-tests <feature> <ssat>  prove smoke checks fail on generated stubs
+forge verify-tests-ts <feature>      prove existing TypeScript tests fail on reviewed source mutants
 forge challenge <feature> <ssat>     write a Factory Passport challenge receipt
 forge smoke <feature>                runtime behavior gate
 forge ship <feature>                seal it

@@ -503,6 +503,38 @@ def test_materialized_stub_is_deterministic_and_identical_to_scaffold(proj, tmp_
         shutil.rmtree(second, ignore_errors=True)
 
 
+def test_adopt_existing_typescript_repo_writes_reviewable_baseline(tmp_path):
+    from forgeline.adoption import adopt
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "sum.ts").write_text("export function sum(a: number, b: number): number { return a + b; }")
+    (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}')
+    result = adopt(tmp_path, "math")
+    assert result["languages"] == ["typescript"]
+    assert (tmp_path / "math.adoption.ssat.yaml").exists()
+    assert Path(result["typescript_manifest"]).exists()
+
+
+def test_typescript_mutant_verification_requires_existing_test_to_fail(tmp_path):
+    from forgeline.gates.typescript_mutants import verify_typescript_tests
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / ".forge" / "math").mkdir(parents=True)
+    (tmp_path / "src" / "sum.ts").write_text("export function sum(a: number, b: number): number { return a + b; }")
+    manifest = {
+        "mutants": [{
+            "name": "sum_returns_stub", "path": "src/sum.ts",
+            "replace_regex": "return a \\+ b;", "replacement": "throw new Error('FORGE_STUB');",
+            "command": "python -c \"import pathlib; assert 'FORGE_STUB' not in pathlib.Path('src/sum.ts').read_text()\"",
+        }]
+    }
+    path = tmp_path / ".forge" / "math" / "typescript-mutants.json"
+    path.write_text(json.dumps(manifest))
+    result = verify_typescript_tests(tmp_path, "math")
+    assert result.passed is True
+    assert result.attribution.n_passed == 1
+
+
 def test_verify_tests_temp_root_is_cleaned_up(proj):
     import tempfile
     o = _to_arch_gated(proj)

@@ -23,11 +23,15 @@ NEXT_ACTION = {
 def main(argv=None):
     p = argparse.ArgumentParser(prog="forge", description="ForgeLine — autonomous software factory outer loop")
     sub = p.add_subparsers(required=True, dest="cmd")
-    for name in ["init","status","expand","gate","architect","fill","review","arch-gate","verify-tests","challenge","smoke","ship","handoff","agent","lessons","policy","qa","optimize-pr","demo","demo-learning"]:
+    for name in ["init","adopt","status","expand","gate","architect","fill","review","arch-gate","verify-tests","verify-tests-ts","challenge","smoke","ship","handoff","agent","lessons","policy","qa","optimize-pr","demo","demo-learning"]:
         sp = sub.add_parser(name)
         if name == "init": sp.add_argument("--root", default=".")
         elif name in {"architect","fill","review","arch-gate","verify-tests"}:
             sp.add_argument("feature"); sp.add_argument("ssat", nargs="?"); sp.add_argument("--root", default=".")
+        elif name == "adopt":
+            sp.add_argument("feature"); sp.add_argument("--root", default="."); sp.add_argument("--out", default=None); sp.add_argument("--force", action="store_true")
+        elif name == "verify-tests-ts":
+            sp.add_argument("feature"); sp.add_argument("--root", default="."); sp.add_argument("--manifest", default=None)
         elif name == "gate":
             sp.add_argument("phase", choices=["architected"]); sp.add_argument("feature"); sp.add_argument("--root", default=".")
         elif name == "challenge":
@@ -48,6 +52,12 @@ def main(argv=None):
         (root/".forge").mkdir(parents=True, exist_ok=True)
         (root/"skills").mkdir(exist_ok=True)
         print("ForgeLine initialized. Next: forge agent claude|codex, then forge expand <feature>")
+    elif a.cmd == "adopt":
+        from .adoption import adopt
+        try:
+            print(json.dumps(adopt(root, a.feature, out=Path(a.out) if a.out else None, force=a.force), indent=2))
+        except FileExistsError as error:
+            raise SystemExit(str(error))
     elif a.cmd == "status":
         if not a.feature: raise SystemExit("feature required")
         st = RunStore(root, a.feature).state
@@ -77,6 +87,12 @@ def main(argv=None):
         print(json.dumps(Orchestrator(root, a.feature).arch_gate(Path(a.ssat)), indent=2))
     elif a.cmd == "verify-tests":
         print(json.dumps(Orchestrator(root, a.feature).verify_tests(Path(a.ssat)), indent=2))
+    elif a.cmd == "verify-tests-ts":
+        from .gates.typescript_mutants import verify_typescript_tests
+        result = verify_typescript_tests(root, a.feature, Path(a.manifest) if a.manifest else None)
+        print(json.dumps({"passed": result.passed, "attribution": result.attribution.to_dict()}, indent=2))
+        if not result.passed:
+            raise SystemExit(1)
     elif a.cmd == "challenge":
         from .gates.reverse_classical import verify_tests
         gate = verify_tests(root, a.feature, Path(a.ssat))
