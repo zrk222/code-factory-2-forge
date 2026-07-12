@@ -535,6 +535,33 @@ def test_typescript_mutant_verification_requires_existing_test_to_fail(tmp_path)
     assert result.attribution.n_passed == 1
 
 
+def test_typescript_mutant_verification_refuses_a_broken_baseline(tmp_path):
+    from forgeline.gates.typescript_mutants import verify_typescript_tests
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / ".forge" / "math").mkdir(parents=True)
+    (tmp_path / "src" / "sum.ts").write_text("export const sum = () => 2;")
+    manifest = {"mutants": [{
+        "name": "sum_stub", "path": "src/sum.ts", "replace_regex": "=> 2", "replacement": "=> 0",
+        "command": "python -c \"raise SystemExit(1)\"",
+    }]}
+    (tmp_path / ".forge" / "math" / "typescript-mutants.json").write_text(json.dumps(manifest))
+    result = verify_typescript_tests(tmp_path, "math")
+    assert result.passed is False
+    assert result.attribution.failures[0].failure_class.value == "hollow_manifest"
+    assert "before mutation" in result.attribution.failures[0].evidence
+
+
+def test_typescript_mutant_verification_rejects_incomplete_manifest(tmp_path):
+    from forgeline.gates.typescript_mutants import verify_typescript_tests
+
+    (tmp_path / ".forge" / "math").mkdir(parents=True)
+    (tmp_path / ".forge" / "math" / "typescript-mutants.json").write_text(json.dumps({"mutants": [{"name": "missing-fields"}]}))
+    result = verify_typescript_tests(tmp_path, "math")
+    assert result.passed is False
+    assert result.attribution.failures[0].failure_class.value == "hollow_manifest"
+
+
 def test_verify_tests_temp_root_is_cleaned_up(proj):
     import tempfile
     o = _to_arch_gated(proj)

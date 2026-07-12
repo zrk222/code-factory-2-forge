@@ -27,13 +27,33 @@ def verify_typescript_tests(root: Path, feature: str, manifest_path: Path | None
         shutil.copytree(root, tmp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", "node_modules", "dist", "build", ".next", "coverage", ".forge"))
         units = []
         for mutant in mutants:
+            required = ("name", "path", "replace_regex", "command")
+            if (not isinstance(mutant, dict) or
+                    not all(isinstance(mutant.get(key), str) and mutant[key] for key in required) or
+                    not isinstance(mutant.get("replacement"), str)):
+                units.append(UnitResult("typescript:manifest", "verify_tests_ts", False, "each mutant requires non-empty name, path, replace_regex, and command strings plus a replacement string", FailureClass.HOLLOW_MANIFEST))
+                continue
             name = mutant["name"]
             target = tmp / mutant["path"]
             if not target.exists():
                 units.append(UnitResult(f"typescript:{name}", "verify_tests_ts", False, f"mutant target missing: {mutant['path']}", FailureClass.HOLLOW_MANIFEST))
                 continue
+            # A failing command before mutation is not proof that the mutant was killed.
+            try:
+                baseline = subprocess.run(mutant["command"], cwd=tmp, shell=True, capture_output=True, text=True,
+                                          timeout=int(mutant.get("timeout_s", 60)))
+            except subprocess.TimeoutExpired:
+                units.append(UnitResult(f"typescript:{name}", "verify_tests_ts", False, "baseline test command timed out", FailureClass.HOLLOW_MANIFEST))
+                continue
+            if baseline.returncode != 0:
+                units.append(UnitResult(f"typescript:{name}", "verify_tests_ts", False, f"baseline test command failed before mutation (exit {baseline.returncode})", FailureClass.HOLLOW_MANIFEST))
+                continue
             source = target.read_text(encoding="utf-8")
-            changed, count = re.subn(mutant["replace_regex"], mutant["replacement"], source, count=1, flags=re.S)
+            try:
+                changed, count = re.subn(mutant["replace_regex"], mutant["replacement"], source, count=1, flags=re.S)
+            except re.error as error:
+                units.append(UnitResult(f"typescript:{name}", "verify_tests_ts", False, f"invalid reviewed mutation regex: {error}", FailureClass.HOLLOW_MANIFEST))
+                continue
             if count != 1:
                 units.append(UnitResult(f"typescript:{name}", "verify_tests_ts", False, "reviewed mutation did not match exactly once", FailureClass.HOLLOW_MANIFEST))
                 continue
