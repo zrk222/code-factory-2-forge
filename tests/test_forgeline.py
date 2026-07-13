@@ -390,7 +390,7 @@ def test_cli_requires_feature_scope_and_reports_machine_provenance(proj, capsys)
     main(["version", "--json"])
     provenance = json.loads(capsys.readouterr().out)
     assert provenance["package"] == "code-factory-2-forge"
-    assert provenance["version"] == "0.10.1"
+    assert provenance["version"] == "0.10.2"
     assert {"source_commit", "build_hash", "install_origin", "python"} <= provenance.keys()
 
 def test_learning_kernel_promotes_recurring_lessons(proj):

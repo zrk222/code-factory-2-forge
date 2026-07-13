@@ -11,4 +11,4 @@ hard CI gate, and learning from every run via an evolving skill memory.
                          └──────── refine loop ─────────┘
                                    skill memory learns each pass
 """
-__version__ = "0.10.1"
+__version__ = "0.10.2"

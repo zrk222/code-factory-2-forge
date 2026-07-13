@@ -7,8 +7,8 @@ runs a generate → **adversarial review** → refine loop, enforces
 **architecture as a hard CI gate**, and gets smarter every run via an evolving
 skill memory.
 
-It orchestrates its siblings — [SpecLine](../specline) (spec governance) and
-[Harness Software Factory](../harness-factory) (compiled decisions) — into one
+It orchestrates its siblings — [SpecLine](https://github.com/zrk222/code-factory-1-spec) (spec governance) and
+[Harness Software Factory](https://github.com/zrk222/code-factory-3-compile) (compiled decisions) — into one
 pipeline you drive from Claude Code or Codex.
 
 > Stop writing the code. Build — and supervise — the machine that writes it.
