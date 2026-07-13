@@ -1,11 +1,14 @@
 import json
 import hashlib
+import shutil
+import subprocess
+import yaml
 from pathlib import Path
 import pytest
 from forgeline.states import State, can_transition, IllegalTransition
 from forgeline.run_store import RunStore
 from forgeline.orchestrator import Orchestrator
-from forgeline.ssat import load_ssat, scaffold_from_ssat, check_erosion
+from forgeline.ssat import ScaffoldError, load_ssat, scaffold_from_ssat, check_erosion
 from conftest import fill_good, write_smoke_manifest
 
 def test_state_machine_rejects_illegal_transitions():
@@ -46,6 +49,126 @@ def test_scaffold_generates_signatures_from_ssat(proj):
     assert len(created) == 2
     text = (proj/"slices"/"notifier"/"formatter.py").read_text()
     assert "def format_message(event: dict) -> str:" in text and "NotImplementedError" in text
+
+
+def _typescript_ssat(paths: list[str]) -> dict:
+    return {
+        "name": "typescript-safety",
+        "modules": [
+            {
+                "name": Path(path).stem.replace("-", "_"),
+                "path": path,
+                "imports": [],
+                "functions": [{"name": "render", "args": ["name: string"], "returns": "string"}],
+            }
+            for path in paths
+        ],
+        "dependencies": [],
+        "invariants": [],
+    }
+
+
+def test_existing_typescript_target_conflicts_without_force_and_preserves_hash(proj, capsys):
+    target = proj / "src" / "memory.ts"
+    target.parent.mkdir(parents=True)
+    target.write_text("export const preserved = true;\n", encoding="utf-8")
+    before = hashlib.sha256(target.read_bytes()).hexdigest()
+    orchestrator = Orchestrator(proj, "notifier")
+    orchestrator.store.set_state(State.ARCHITECTED)
+    spec = proj / "typescript.ssat.yaml"
+    spec.write_text(yaml.safe_dump(_typescript_ssat(["src/memory.ts"])), encoding="utf-8")
+
+    from forgeline.cli import main
+    with pytest.raises(SystemExit) as exited:
+        main(["architect", "notifier", str(spec), "--root", str(proj)])
+    assert exited.value.code == 1
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["scaffolded"] is False
+    assert result["error"]["code"] == "E_SCAFFOLD"
+    assert result["report"]["conflicts"][0]["path"] == str(target)
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == before
+    assert orchestrator.store.state == State.ARCHITECTED
+
+
+def test_typescript_ssat_generates_typescript_and_compiles_when_tsc_is_available(proj):
+    report = scaffold_from_ssat(_typescript_ssat(["src/memory.ts"]), proj)
+    target = proj / "src" / "memory.ts"
+    source = target.read_text(encoding="utf-8")
+    assert len(report) == 1
+    assert "export function render(name: string): string" in source
+    assert "def render" not in source
+    tsc = shutil.which("tsc")
+    if tsc is None:
+        pytest.skip("tsc is installed by CI for the TypeScript scaffold regression")
+    completed = subprocess.run([tsc, "--noEmit", "--pretty", "false", str(target)], capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_mixed_language_ssat_generates_each_language_and_rejects_unknown_extensions(proj):
+    report = scaffold_from_ssat(_typescript_ssat(["src/memory.ts", "src/worker.py"]), proj)
+    assert len(report.created) == 2
+    assert "export function render" in (proj / "src" / "memory.ts").read_text(encoding="utf-8")
+    assert "def render" in (proj / "src" / "worker.py").read_text(encoding="utf-8")
+    with pytest.raises(ScaffoldError) as raised:
+        scaffold_from_ssat(_typescript_ssat(["src/not-supported.go"]), proj)
+    assert "unsupported SSAT module extension" in str(raised.value)
+    assert not (proj / "src" / "not-supported.go").exists()
+
+
+def test_scaffold_second_write_failure_restores_prior_files_byte_for_byte(proj, monkeypatch):
+    spec = _typescript_ssat(["src/a.ts", "src/b.ts"])
+    first = proj / "src" / "a.ts"
+    second = proj / "src" / "b.ts"
+    first.parent.mkdir(parents=True)
+    first.write_text("export const originalA = true;\n", encoding="utf-8")
+    second.write_text("export const originalB = true;\n", encoding="utf-8")
+    original_first, original_second = first.read_bytes(), second.read_bytes()
+
+    from forgeline import ssat as ssat_module
+    real_replace = ssat_module.os.replace
+
+    def fail_second_temp(source, target):
+        if Path(target) == second and str(source).endswith(".forge-tmp"):
+            raise OSError("simulated second-file replace failure")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(ssat_module.os, "replace", fail_second_temp)
+    with pytest.raises(ScaffoldError) as raised:
+        scaffold_from_ssat(spec, proj, force=True)
+
+    assert raised.value.report.rollback_performed is True
+    assert first.read_bytes() == original_first
+    assert second.read_bytes() == original_second
+
+
+def test_scaffold_report_never_calls_preexisting_target_created(proj):
+    target = proj / "src" / "present.ts"
+    target.parent.mkdir(parents=True)
+    target.write_text("export const before = true;\n", encoding="utf-8")
+    report = scaffold_from_ssat(_typescript_ssat(["src/present.ts", "src/new.ts"]), proj, force=True)
+    assert [Path(item.path).name for item in report.created] == ["new.ts"]
+    assert [Path(item.path).name for item in report.overwritten] == ["present.ts"]
+
+
+def test_architect_illegal_transition_returns_structured_error_without_traceback(proj, capsys):
+    orchestrator = Orchestrator(proj, "notifier")
+    orchestrator.store.set_state(State.EXPANDED)
+    from forgeline.cli import main
+    with pytest.raises(SystemExit) as exited:
+        main(["architect", "notifier", str(proj / "notifier.ssat.yaml"), "--root", str(proj)])
+    assert exited.value.code == 1
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    result = json.loads(captured.out)
+    assert result["scaffolded"] is False
+    assert result["error"] == {
+        "code": "E_ILLEGAL_TRANSITION",
+        "current_state": "expanded",
+        "requested_state": "scaffolded",
+        "next": "forge gate architected <feature> --root .",
+    }
+    assert not (proj / "slices" / "notifier" / "formatter.py").exists()
 
 def test_arch_erosion_detects_signature_drift(proj):
     ssat = load_ssat(proj/"notifier.ssat.yaml")

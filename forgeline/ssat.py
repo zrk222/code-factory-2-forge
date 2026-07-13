@@ -1,15 +1,18 @@
-"""Semantic Software Architecture Tree — architecture as code, not a doc.
-
-An SSAT is a YAML contract: modules, their public signatures, allowed
-dependency edges, and invariants. It is BOTH the scaffold source AND the
-CI gate — the same artifact that generates the skeleton also detects
-'structural erosion' when filled code violates the declared boundaries.
-"""
+"""Semantic Software Architecture Tree: executable, language-aware contracts."""
 from __future__ import annotations
-import ast, re
+
+import ast
+import hashlib
+import os
+import re
+import shutil
+import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+
 import yaml
+
 
 @dataclass
 class ArchViolation:
@@ -17,77 +20,326 @@ class ArchViolation:
     message: str
     where: str = ""
 
-def load_ssat(path: Path) -> dict:
-    return yaml.safe_load(Path(path).read_text())
 
-def scaffold_from_ssat(ssat: dict, out_dir: Path) -> list[Path]:
-    """Generate signature-only files with valid imports from the SSAT."""
-    out_dir = Path(out_dir); created = []
-    for mod in ssat.get("modules", []):
-        p = out_dir/mod["path"]
-        p.parent.mkdir(parents=True, exist_ok=True)
-        lines = ['"""AUTO-SCAFFOLD from SSAT. Fill bodies only; do not change signatures."""']
-        for imp in mod.get("imports", []):
-            lines.append(f"import {imp}" if "." not in imp else f"from {imp.rsplit('.',1)[0]} import {imp.rsplit('.',1)[1]}")
-        lines.append("")
-        for fn in mod.get("functions", []):
-            args = ", ".join(fn.get("args", []))
-            ret = fn.get("returns", "None")
-            lines.append(f"def {fn['name']}({args}) -> {ret}:")
-            lines.append(f'    """{fn.get("doc","TODO")}"""')
-            lines.append("    raise NotImplementedError  # FILL")
-            lines.append("")
-        p.write_text("\n".join(lines)); created.append(p)
-    return created
+class ScaffoldError(RuntimeError):
+    """A safe scaffold failure with a machine-readable report."""
+
+    def __init__(self, message: str, report: "ScaffoldReport"):
+        super().__init__(message)
+        self.report = report
+
+
+@dataclass
+class ScaffoldFile:
+    path: str
+    action: str
+    before_sha256: str | None = None
+    after_sha256: str | None = None
+    backup: str | None = None
+    detail: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "path": self.path,
+            "action": self.action,
+            "before_sha256": self.before_sha256,
+            "after_sha256": self.after_sha256,
+            "backup": self.backup,
+            "detail": self.detail,
+        }
+
+
+@dataclass
+class ScaffoldReport:
+    dry_run: bool
+    created: list[ScaffoldFile] = field(default_factory=list)
+    skipped: list[ScaffoldFile] = field(default_factory=list)
+    conflicts: list[ScaffoldFile] = field(default_factory=list)
+    overwritten: list[ScaffoldFile] = field(default_factory=list)
+    rollback_performed: bool = False
+
+    @property
+    def created_paths(self) -> list[Path]:
+        return [Path(item.path) for item in self.created]
+
+    def __len__(self) -> int:
+        """Compatibility for callers that previously received ``list[Path]``."""
+        return len(self.created)
+
+    def __iter__(self):
+        return iter(self.created_paths)
+
+    def to_dict(self) -> dict:
+        return {
+            "dry_run": self.dry_run,
+            "created": [item.to_dict() for item in self.created],
+            "skipped": [item.to_dict() for item in self.skipped],
+            "conflicts": [item.to_dict() for item in self.conflicts],
+            "overwritten": [item.to_dict() for item in self.overwritten],
+            "rollback_performed": self.rollback_performed,
+        }
+
+
+_LANGUAGE_BY_SUFFIX = {".py": "python", ".ts": "typescript", ".tsx": "typescript"}
+
+
+def load_ssat(path: Path) -> dict:
+    return yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    return _sha256_bytes(path.read_bytes())
+
+
+def _language_for(path: Path) -> str:
+    language = _LANGUAGE_BY_SUFFIX.get(path.suffix.lower())
+    if language is None:
+        raise ValueError(f"unsupported SSAT module extension: {path.suffix or '<none>'}")
+    return language
+
+
+def _python_import(imp: str) -> str:
+    return f"import {imp}" if "." not in imp else f"from {imp.rsplit('.', 1)[0]} import {imp.rsplit('.', 1)[1]}"
+
+
+def _typescript_import(imp: str) -> str:
+    if imp.startswith("import "):
+        return imp
+    alias = re.sub(r"[^A-Za-z0-9_]", "_", imp.rsplit("/", 1)[-1]) or "module_"
+    source = imp if imp.startswith((".", "/")) else f"./{imp}"
+    return f'import * as {alias} from "{source}";'
+
+
+def _render_python(module: dict) -> str:
+    lines = ['"""AUTO-SCAFFOLD from SSAT. Fill bodies only; do not change signatures."""']
+    lines.extend(_python_import(imp) for imp in module.get("imports", []))
+    lines.append("")
+    for function in module.get("functions", []):
+        args = ", ".join(function.get("args", []))
+        returns = function.get("returns", "None")
+        lines.extend([
+            f"def {function['name']}({args}) -> {returns}:",
+            f'    """{function.get("doc", "TODO")}"""',
+            "    raise NotImplementedError  # FILL",
+            "",
+        ])
+    return "\n".join(lines)
+
+
+def _render_typescript(module: dict) -> str:
+    lines = ["/** AUTO-SCAFFOLD from SSAT. Fill bodies only; do not change signatures. */"]
+    lines.extend(_typescript_import(imp) for imp in module.get("imports", []))
+    lines.append("")
+    for function in module.get("functions", []):
+        args = ", ".join(function.get("args", []))
+        returns = function.get("returns", "void")
+        lines.extend([
+            f"/** {function.get('doc', 'TODO')} */",
+            f"export function {function['name']}({args}): {returns} {{",
+            '  throw new Error("NotImplementedError: FILL");',
+            "}",
+            "",
+        ])
+    return "\n".join(lines)
+
+
+def _render_module(module: dict, target: Path) -> str:
+    language = _language_for(target)
+    if language == "python":
+        return _render_python(module)
+    return _render_typescript(module)
+
+
+def _validate_generated_source(source: str, target: Path) -> None:
+    language = _language_for(target)
+    if language == "python":
+        ast.parse(source)
+        return
+    if re.search(r"^\s*def\s+", source, flags=re.MULTILINE) or source.count("{") != source.count("}"):
+        raise ValueError(f"generated invalid TypeScript for {target}")
+    for line in source.splitlines():
+        if "export function " in line and not re.search(r"export function \w+\(.*\):\s*[^\s]+\s*\{", line):
+            raise ValueError(f"generated invalid TypeScript signature for {target}")
+
+
+def scaffold_from_ssat(
+    ssat: dict,
+    out_dir: Path,
+    *,
+    force: bool = False,
+    dry_run: bool = False,
+    backup_root: Path | None = None,
+) -> ScaffoldReport:
+    """Plan, validate, and atomically materialize a language-aware SSAT scaffold.
+
+    Existing files are conflicts by default. ``force=True`` creates a timestamped
+    backup before an atomic replacement. No target is changed until every module
+    has rendered and validated; any write failure restores every earlier target.
+    """
+    out_dir = Path(out_dir).resolve()
+    report = ScaffoldReport(dry_run=dry_run)
+    plan: list[tuple[dict, Path, str, bytes | None]] = []
+    seen: set[Path] = set()
+
+    try:
+        for module in ssat.get("modules", []):
+            target = (out_dir / module["path"]).resolve()
+            if out_dir not in target.parents and target != out_dir:
+                raise ValueError(f"SSAT module path escapes root: {module['path']}")
+            if target in seen:
+                raise ValueError(f"SSAT declares duplicate module path: {module['path']}")
+            seen.add(target)
+            source = _render_module(module, target)
+            _validate_generated_source(source, target)
+            previous = target.read_bytes() if target.exists() else None
+            action = "overwrite" if previous is not None and force else "conflict" if previous is not None else "create"
+            item = ScaffoldFile(
+                path=str(target),
+                action=action,
+                before_sha256=_sha256_bytes(previous) if previous is not None else None,
+                after_sha256=_sha256_bytes(source.encode("utf-8")),
+            )
+            if action == "conflict":
+                report.conflicts.append(item)
+            elif action == "overwrite":
+                report.overwritten.append(item)
+            else:
+                report.created.append(item)
+            plan.append((module, target, source, previous))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ScaffoldError(str(exc), report) from exc
+
+    if report.conflicts:
+        raise ScaffoldError("existing SSAT targets require --force", report)
+    if dry_run:
+        return report
+
+    temp_paths: list[tuple[Path, Path]] = []
+    backups: dict[Path, Path] = {}
+    created_targets = [target for _, target, _, previous in plan if previous is None]
+    try:
+        # Validate every temp file before changing a single target.
+        for _, target, source, _ in plan:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".forge-tmp", dir=target.parent)
+            temp = Path(temp_name)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(source)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temp_paths.append((temp, target))
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_root = Path(backup_root) if backup_root else out_dir / ".forge" / "scaffold-backups" / timestamp
+        for _, target, _, previous in plan:
+            if previous is not None:
+                backup = backup_root / target.relative_to(out_dir)
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, backup)
+                backups[target] = backup
+                next(item for item in report.overwritten if item.path == str(target)).backup = str(backup)
+
+        for temp, target in temp_paths:
+            os.replace(temp, target)
+        return report
+    except Exception as exc:
+        for target, backup in backups.items():
+            if backup.exists():
+                shutil.copy2(backup, target)
+        for target in created_targets:
+            if target.exists() and target not in backups:
+                target.unlink()
+        report.rollback_performed = bool(backups or created_targets)
+        raise ScaffoldError(f"scaffold transaction rolled back: {exc}", report) from exc
+    finally:
+        for temp, _ in temp_paths:
+            if temp.exists():
+                temp.unlink()
+
 
 def _module_of(path: str, ssat: dict) -> str | None:
-    for mod in ssat.get("modules", []):
-        if path.endswith(mod["path"]):
-            return mod["name"]
+    for module in ssat.get("modules", []):
+        if path.endswith(module["path"]):
+            return module["name"]
     return None
 
+
+def _typescript_erosion(module: dict, path: Path, names: dict, allowed: set[tuple[str, str]]) -> list[ArchViolation]:
+    """A TypeScript-specific structure check. Python's AST is never used here."""
+    source = path.read_text(encoding="utf-8")
+    violations: list[ArchViolation] = []
+    if re.search(r"^\s*def\s+", source, flags=re.MULTILINE) or source.count("{") != source.count("}"):
+        return [ArchViolation("E_TS_SYNTAX", "invalid TypeScript structure", module["path"])]
+    for function in module.get("functions", []):
+        pattern = re.compile(rf"(?:export\s+)?(?:async\s+)?function\s+{re.escape(function['name'])}\s*\(([^)]*)\)", re.MULTILINE)
+        match = pattern.search(source)
+        if match is None:
+            violations.append(ArchViolation("E_SIG_MISSING", f"{function['name']} declared but not implemented", module["path"]))
+            continue
+        got_args = [part.split(":", 1)[0].strip().rstrip("?") for part in match.group(1).split(",") if part.strip()]
+        want_args = [arg.split(":", 1)[0].strip().rstrip("?") for arg in function.get("args", [])]
+        if got_args != want_args:
+            violations.append(ArchViolation("E_SIG_DRIFT", f"{function['name']}({got_args}) != SSAT ({want_args})", module["path"]))
+    this = module["name"]
+    for imported in re.findall(r"(?:from\s+|import\s+)['\"]([^'\"]+)['\"]", source):
+        target = names.get(Path(imported).stem) or names.get(imported)
+        target_name = target["name"] if target else None
+        if target_name and target_name != this and (this, target_name) not in allowed:
+            violations.append(ArchViolation("E_ILLEGAL_DEP", f"{this} -> {target_name} not in SSAT dependency allowlist", module["path"]))
+    return violations
+
+
 def check_erosion(ssat: dict, src_dir: Path) -> list[ArchViolation]:
-    """Architecture-as-CI-gate: detect signature drift + illegal dependency edges."""
-    src_dir = Path(src_dir); violations = []
-    allowed = {(e["from"], e["to"]) for e in ssat.get("dependencies", [])}
-    names = {m["name"]: m for m in ssat.get("modules", [])}
-    path_to_name = {m["path"]: m["name"] for m in ssat.get("modules", [])}
-    for mod in ssat.get("modules", []):
-        p = src_dir/mod["path"]
-        if not p.exists():
-            violations.append(ArchViolation("E_MISSING_MODULE", f"{mod['path']} declared in SSAT but absent"))
+    """Detect signature drift and illegal dependency edges per source language."""
+    src_dir = Path(src_dir)
+    violations: list[ArchViolation] = []
+    allowed = {(edge["from"], edge["to"]) for edge in ssat.get("dependencies", [])}
+    names = {module["name"]: module for module in ssat.get("modules", [])}
+    for module in ssat.get("modules", []):
+        path = src_dir / module["path"]
+        if not path.exists():
+            violations.append(ArchViolation("E_MISSING_MODULE", f"{module['path']} declared in SSAT but absent"))
             continue
         try:
-            tree = ast.parse(p.read_text())
-        except SyntaxError as e:
-            violations.append(ArchViolation("E_SYNTAX", str(e), mod["path"])); continue
-        # signature drift
-        declared = {f["name"]: f for f in mod.get("functions", [])}
-        found = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
-        for fname, fspec in declared.items():
-            if fname not in found:
-                violations.append(ArchViolation("E_SIG_MISSING", f"{fname} declared but not implemented", mod["path"]))
+            language = _language_for(path)
+        except ValueError as exc:
+            violations.append(ArchViolation("E_UNSUPPORTED_LANGUAGE", str(exc), module["path"]))
+            continue
+        if language == "typescript":
+            violations.extend(_typescript_erosion(module, path, names, allowed))
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError as exc:
+            violations.append(ArchViolation("E_SYNTAX", str(exc), module["path"]))
+            continue
+        declared = {function["name"]: function for function in module.get("functions", [])}
+        found = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+        for name, spec in declared.items():
+            if name not in found:
+                violations.append(ArchViolation("E_SIG_MISSING", f"{name} declared but not implemented", module["path"]))
                 continue
-            got_args = [a.arg for a in found[fname].args.args]
-            want_args = [a.split(":")[0].strip() for a in fspec.get("args", [])]
+            got_args = [arg.arg for arg in found[name].args.args]
+            want_args = [arg.split(":", 1)[0].strip() for arg in spec.get("args", [])]
             if got_args != want_args:
-                violations.append(ArchViolation("E_SIG_DRIFT",
-                    f"{fname}({got_args}) != SSAT ({want_args})", mod["path"]))
-        # illegal dependency edges
-        this = mod["name"]
+                violations.append(ArchViolation("E_SIG_DRIFT", f"{name}({got_args}) != SSAT ({want_args})", module["path"]))
+        this = module["name"]
         for node in ast.walk(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
-                mods = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
-                for m in mods:
-                    target = names.get(m.split(".")[-1]) or names.get(m)
-                    tname = target["name"] if target else None
-                    if tname and tname != this and (this, tname) not in allowed:
-                        violations.append(ArchViolation("E_ILLEGAL_DEP",
-                            f"{this} -> {tname} not in SSAT dependency allowlist", mod["path"]))
-    for inv in ssat.get("invariants", []):
-        pat = inv["forbid_pattern"]
-        for mod in ssat.get("modules", []):
-            p = src_dir/mod["path"]
-            if p.exists() and re.search(pat, p.read_text()):
-                violations.append(ArchViolation("E_INVARIANT", f"{inv['name']}: forbidden pattern {pat!r}", mod["path"]))
+                imports = [alias.name for alias in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+                for imported in imports:
+                    target = names.get(imported.split(".")[-1]) or names.get(imported)
+                    target_name = target["name"] if target else None
+                    if target_name and target_name != this and (this, target_name) not in allowed:
+                        violations.append(ArchViolation("E_ILLEGAL_DEP", f"{this} -> {target_name} not in SSAT dependency allowlist", module["path"]))
+    for invariant in ssat.get("invariants", []):
+        pattern = invariant["forbid_pattern"]
+        for module in ssat.get("modules", []):
+            path = src_dir / module["path"]
+            if path.exists() and re.search(pattern, path.read_text(encoding="utf-8")):
+                violations.append(ArchViolation("E_INVARIANT", f"{invariant['name']}: forbidden pattern {pattern!r}", module["path"]))
     return violations

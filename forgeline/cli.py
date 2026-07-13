@@ -28,6 +28,9 @@ def main(argv=None):
         if name == "init": sp.add_argument("--root", default=".")
         elif name in {"architect","fill","review","arch-gate","verify-tests"}:
             sp.add_argument("feature"); sp.add_argument("ssat", nargs="?"); sp.add_argument("--root", default=".")
+            if name == "architect":
+                sp.add_argument("--dry-run", action="store_true", help="plan scaffold actions without writing files")
+                sp.add_argument("--force", action="store_true", help="overwrite existing targets after creating backups")
         elif name == "adopt":
             sp.add_argument("feature"); sp.add_argument("--root", default="."); sp.add_argument("--out", default=None); sp.add_argument("--force", action="store_true")
         elif name == "verify-tests-ts":
@@ -75,7 +78,10 @@ def main(argv=None):
             raise SystemExit(1)
     elif a.cmd == "architect":
         o = Orchestrator(root, a.feature)
-        print(json.dumps(o.architect(Path(a.ssat)), indent=2))
+        result = o.architect(Path(a.ssat), force=a.force, dry_run=a.dry_run)
+        print(json.dumps(result, indent=2))
+        if not result["scaffolded"] and not a.dry_run:
+            raise SystemExit(1)
     elif a.cmd == "fill":
         result = Orchestrator(root, a.feature).fill(Path(a.ssat))
         print(json.dumps(result, indent=2))

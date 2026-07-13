@@ -59,7 +59,7 @@ forge init
 forge agent claude         # wire your agent (see full list below)
 forge status <feature>     # the state machine names the ONE next action
 forge optimize-pr <feature> # bounded PR hardening loop plan
-pytest -q                  # 29 tests
+pytest -q                  # full ForgeLine suite
 ```
 
 ## PR hardening loop
@@ -105,6 +105,22 @@ as the CI gate: `check_erosion()` detects signature drift (`E_SIG_DRIFT`),
 illegal dependencies (`E_ILLEGAL_DEP`), and invariant violations
 (`E_INVARIANT`) — structural erosion caught before merge.
 
+**Scaffolding is fail-closed.** `forge architect` will not overwrite an
+existing module. Start with a plan:
+
+```bash
+forge architect <feature> <ssat> --dry-run --root .
+```
+
+The JSON report separates `created`, `skipped`, `conflicts`, and `overwritten`
+files and includes before/after SHA-256 values. Existing targets are reported as
+conflicts and leave both the files and feature state unchanged. An intentional
+replacement requires `--force`; ForgeLine first writes timestamped backups under
+`.forge/scaffold-backups/`, validates every generated file, and restores every
+modified target if any replacement fails. Python, TypeScript, and TSX scaffolds
+use extension-specific generators and structure checks; unsupported extensions
+are rejected rather than receiving Python syntax.
+
 **The grumpy adversary.** A review agent that *assumes your code is broken and
 insecure* and makes the generator prove otherwise. Executable heuristics catch
 eval/exec/shell-injection/hard-coded-secrets/bare-excepts, and it refuses to
@@ -139,7 +155,9 @@ forge agent claude|codex            wire the entry-point skill
 forge status <feature>              current state + the ONE next action
 forge expand <feature>              draft use cases (→ human gate)
 forge gate architected <feature>    record explicit architecture approval
-forge architect <feature> <ssat>    generate scaffold from architecture-as-code
+forge architect <feature> <ssat> --dry-run  show create/conflict/overwrite plan without writes
+forge architect <feature> <ssat>            generate new files; existing files fail closed
+forge architect <feature> <ssat> --force    back up then intentionally replace existing targets
 forge fill <feature> <ssat>         prove bodies are implemented; enter FILLED
 forge review <feature> <ssat>       judge + grumpy adversary + arch erosion (refine loop)
 forge arch-gate <feature> <ssat>    architecture CI gate

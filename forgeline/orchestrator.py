@@ -7,7 +7,7 @@ import shutil, subprocess, sys
 from pathlib import Path
 from .states import State, can_transition, IllegalTransition, HUMAN_GATES
 from .run_store import RunStore
-from .ssat import load_ssat, scaffold_from_ssat, check_erosion
+from .ssat import ScaffoldError, load_ssat, scaffold_from_ssat, check_erosion
 from .gates import judge_consistency, grumpy_review, skill_check
 from .gates.qa_audit import qa_audit
 from .skill_memory import record_lesson, inject_lessons_block, lessons_for
@@ -15,6 +15,20 @@ from .learning import LearningKernel
 from .attribution import Attribution, FailureClass, UnitResult
 
 MAX_REFINE = 3
+
+_NEXT_ACTION = {
+    State.INTENT: "forge expand <feature> --root .",
+    State.EXPANDED: "forge gate architected <feature> --root .",
+    State.ARCHITECTED: "forge architect <feature> <ssat.yaml> --root .",
+    State.SCAFFOLDED: "forge fill <feature> <ssat.yaml> --root .",
+    State.FILLED: "forge review <feature> <ssat.yaml> --root .",
+    State.REVIEWED: "forge arch-gate <feature> <ssat.yaml> --root .",
+    State.ARCH_GATED: "forge verify-tests <feature> <ssat.yaml> --root .",
+    State.TESTS_VERIFIED: "forge smoke <feature> --root .",
+    State.SMOKED: "forge ship <feature> --root .",
+    State.BLOCKED: "inspect the failed receipt, repair it, then rerun its gate",
+    State.SHIPPED: "no further action; feature is shipped",
+}
 
 
 def _gate_attribution(stage: str, checks: list[tuple[str, bool, str, FailureClass]]) -> dict:
@@ -67,12 +81,38 @@ class Orchestrator:
         self._advance(State.FILLED, "implemented bodies verified", attribution=attr)
         return {"filled": True, "attribution": attr}
 
-    def architect(self, ssat_path: Path) -> dict:
-        ssat = load_ssat(ssat_path)
-        created = scaffold_from_ssat(ssat, self.root)
-        self._advance(State.SCAFFOLDED, "scaffold from SSAT",
-                      modules=len(ssat.get("modules", [])), files=[str(c) for c in created])
-        return {"scaffolded": [str(c) for c in created]}
+    def architect(self, ssat_path: Path, *, force: bool = False, dry_run: bool = False) -> dict:
+        """Safely materialize the SSAT scaffold only from an allowed state."""
+        current = self.store.state
+        if current not in {State.ARCHITECTED, State.BLOCKED}:
+            return {
+                "scaffolded": False,
+                "error": {
+                    "code": "E_ILLEGAL_TRANSITION",
+                    "current_state": current.value,
+                    "requested_state": State.SCAFFOLDED.value,
+                    "next": _NEXT_ACTION[current],
+                },
+            }
+        try:
+            report = scaffold_from_ssat(
+                load_ssat(ssat_path), self.root, force=force, dry_run=dry_run,
+            )
+        except ScaffoldError as error:
+            return {"scaffolded": False, "error": {"code": "E_SCAFFOLD", "message": str(error)},
+                    "report": error.report.to_dict()}
+        result = {"scaffolded": not dry_run, "report": report.to_dict()}
+        if dry_run:
+            return result
+        self._advance(
+            State.SCAFFOLDED,
+            "scaffold from SSAT",
+            modules=len(load_ssat(ssat_path).get("modules", [])),
+            created=[item.to_dict() for item in report.created],
+            overwritten=[item.to_dict() for item in report.overwritten],
+            skipped=[item.to_dict() for item in report.skipped],
+        )
+        return result
 
     def review(self, ssat_path: Path) -> dict:
         """Judge + grumpy adversary + arch erosion + deep QA audit, with a

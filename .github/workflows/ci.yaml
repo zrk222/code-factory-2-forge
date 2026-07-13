@@ -17,3 +17,17 @@ jobs:
       - run: python -m pytest -q
       - name: demo runs clean (self-catching factory)
         run: python -c "from forgeline.demo import run; run()"
+  typescript-scaffold:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - run: python -m pip install -e ".[dev]"
+      - run: npm install --no-save --prefix .forge-tsc typescript@5
+      - run: echo "${GITHUB_WORKSPACE}/.forge-tsc/node_modules/.bin" >> "$GITHUB_PATH"
+      - run: python -m pytest -q tests/test_forgeline.py -k typescript

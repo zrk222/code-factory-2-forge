@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "code-factory-2-forge"
-version = "0.9.1"
+version = "0.9.2"
 description = "ForgeLine — the autonomous outer loop for AI software factories. A CLI-backed state machine that drives intent -> spec -> plan -> code -> adversarial review -> ship, orchestrating SpecLine (spec governance) and Harness Software Factory (compiled decisions), with self-improving skills and architecture-as-a-CI-gate."
 readme = "README.md"
 requires-python = ">=3.11"
