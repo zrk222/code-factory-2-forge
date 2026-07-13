@@ -286,6 +286,113 @@ def test_qa_audit_catches_security_and_complexity(proj):
     assert any("QA_SEC" in f for f in r.findings)
     assert not r.passed
 
+
+def test_qa_prunes_pnpm_dependency_tree_and_keeps_feature_inventory(proj):
+    from forgeline.gates.qa_audit import qa_audit
+
+    fill_good(proj)
+    optional = proj / "node_modules" / ".pnpm" / "chokidar" / "node_modules" / "fsevents"
+    optional.mkdir(parents=True)
+    (optional / "optional.py").write_text("def hidden():\n    return eval('1')\n")
+
+    report = qa_audit(proj)
+    assert report.security_score == 100
+    assert all("node_modules" not in path for path in report.scope["code_files"])
+
+
+def test_qa_feature_slice_ignores_unrelated_python_and_never_python_parses_mjs(proj):
+    from forgeline.gates.qa_audit import qa_audit
+
+    feature = proj / "services" / "memory.mjs"
+    feature.parent.mkdir()
+    feature.write_text("export function recall(id) { return id; }\n", encoding="utf-8")
+    unrelated = proj / "legacy" / "bad.py"
+    unrelated.parent.mkdir()
+    unrelated.write_text("def unrelated(:\n", encoding="utf-8")
+
+    report = qa_audit(proj, source_paths=[feature])
+    assert report.scope["code_files"] == ["services/memory.mjs"]
+    assert report.security_score == 100
+    assert not any(finding.startswith("QA_SYNTAX") for finding in report.findings)
+    assert not any("bad.py" in finding for finding in report.findings)
+
+
+def test_qa_complexity_threshold_is_hard_and_cannot_pass_with_grade_b(proj):
+    from forgeline.gates.qa_audit import qa_audit
+
+    target = proj / "slices" / "complexity.py"
+    target.parent.mkdir()
+    target.write_text(
+        'def too_complex(x):\n'
+        '    """A deliberately complex feature."""\n'
+        + "".join(f"    if x == {index}:\n        return {index}\n" for index in range(12))
+        + "    return -1\n",
+        encoding="utf-8",
+    )
+    tests = proj / "tests" / "test_complexity.py"
+    tests.parent.mkdir()
+    tests.write_text("from slices.complexity import too_complex\ndef test_it(): assert too_complex(1) == 1\n")
+
+    report = qa_audit(proj, source_paths=[target])
+    assert report.max_complexity > 10
+    assert report.grade not in {"A", "B"}
+    assert report.passed is False
+    assert any("policy=hard" in finding for finding in report.findings)
+
+
+def test_invariant_regex_requires_a_bounded_symbol_scope(proj):
+    spec = {
+        "name": "scoped-invariant",
+        "modules": [{"name": "sample", "path": "src/sample.py", "functions": [{"name": "target", "args": [], "returns": "str"}]}],
+        "dependencies": [],
+        "invariants": [{
+            "name": "no_eval_in_target", "forbid_pattern": "\\beval\\(",
+            "scopes": [{"module": "sample", "symbol": "target", "max_lines": 20}],
+        }],
+    }
+    target = proj / "src" / "sample.py"
+    target.parent.mkdir()
+    target.write_text("def target():\n    return 'ok'\n\ndef unrelated():\n    return eval('1')\n")
+    assert not any(item.code == "E_INVARIANT" for item in check_erosion(spec, proj))
+
+    target.write_text("def target():\n    return eval('1')\n\ndef unrelated():\n    return 'ok'\n")
+    assert any(item.code == "E_INVARIANT" for item in check_erosion(spec, proj))
+
+    spec["invariants"][0].pop("scopes")
+    assert any(item.code == "E_INVARIANT_SCOPE" for item in check_erosion(spec, proj))
+
+
+def test_fill_attributes_invariant_not_stub(proj):
+    o = Orchestrator(proj, "notifier")
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    fill_good(proj)
+    formatter = proj / "slices" / "notifier" / "formatter.py"
+    formatter.write_text(
+        'def format_message(event: dict) -> str:\n'
+        '    """Render an event."""\n'
+        "    return str(eval('1'))\n"
+    )
+    result = o.fill(proj / "notifier.ssat.yaml")
+    assert result["filled"] is False
+    assert result["attribution"]["dominant_failure_class"] == "invariant_violation"
+
+
+def test_cli_requires_feature_scope_and_reports_machine_provenance(proj, capsys):
+    from forgeline.cli import main
+
+    with pytest.raises(SystemExit) as exited:
+        main(["qa", "--root", str(proj)])
+    assert exited.value.code == 2
+    scope_error = json.loads(capsys.readouterr().out)
+    assert scope_error["error"]["code"] == "E_SCOPE_REQUIRED"
+
+    main(["version", "--json"])
+    provenance = json.loads(capsys.readouterr().out)
+    assert provenance["package"] == "code-factory-2-forge"
+    assert provenance["version"] == "0.10.0"
+    assert {"source_commit", "build_hash", "install_origin", "python"} <= provenance.keys()
+
 def test_learning_kernel_promotes_recurring_lessons(proj):
     from forgeline.learning import LearningKernel
     from forgeline.skill_memory import record_lesson, lessons_for

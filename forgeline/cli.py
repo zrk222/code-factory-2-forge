@@ -1,6 +1,6 @@
 """forge CLI — the state-machine driver."""
 from __future__ import annotations
-import argparse, json
+import argparse, json, sys
 from pathlib import Path
 from .states import State, TRANSITIONS, HUMAN_GATES
 from .run_store import RunStore
@@ -20,10 +20,20 @@ NEXT_ACTION = {
     State.SHIPPED: "done ✓",
 }
 
+def _emit_version(as_json: bool) -> None:
+    from .provenance import provenance
+    payload = provenance()
+    print(json.dumps(payload, indent=2, sort_keys=True) if as_json else f"forge {payload['version']}")
+
+
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "--version":
+        _emit_version("--json" in argv)
+        return
     p = argparse.ArgumentParser(prog="forge", description="ForgeLine — autonomous software factory outer loop")
     sub = p.add_subparsers(required=True, dest="cmd")
-    for name in ["init","adopt","status","expand","gate","architect","fill","review","arch-gate","verify-tests","verify-tests-ts","challenge","smoke","ship","handoff","agent","lessons","policy","qa","optimize-pr","demo","demo-learning"]:
+    for name in ["init","adopt","status","expand","gate","architect","fill","review","arch-gate","verify-tests","verify-tests-ts","challenge","smoke","ship","handoff","agent","lessons","policy","qa","optimize-pr","demo","demo-learning","version"]:
         sp = sub.add_parser(name)
         if name == "init": sp.add_argument("--root", default=".")
         elif name in {"architect","fill","review","arch-gate","verify-tests"}:
@@ -43,15 +53,21 @@ def main(argv=None):
         elif name == "handoff": sp.add_argument("feature"); sp.add_argument("spec"); sp.add_argument("--root", default=".")
         elif name == "lessons": sp.add_argument("--root", default=".")
         elif name == "policy": sp.add_argument("--root", default=".")
-        elif name == "qa": sp.add_argument("--root", default="."); sp.add_argument("--strict", action="store_true")
+        elif name == "qa":
+            sp.add_argument("feature", nargs="?"); sp.add_argument("--ssat", default=None)
+            sp.add_argument("--repo-wide", action="store_true")
+            sp.add_argument("--root", default="."); sp.add_argument("--strict", action="store_true")
         elif name == "optimize-pr": sp.add_argument("feature", nargs="?"); sp.add_argument("--root", default="."); sp.add_argument("--base", default="main")
+        elif name == "version": sp.add_argument("--json", action="store_true")
         elif name == "demo": pass
         elif name == "demo-learning": pass
         elif name == "demo-learning": pass
         else: sp.add_argument("feature", nargs="?"); sp.add_argument("--root", default=".")
     a = p.parse_args(argv); root = Path(getattr(a, "root", "."))
 
-    if a.cmd == "init":
+    if a.cmd == "version":
+        _emit_version(a.json)
+    elif a.cmd == "init":
         (root/".forge").mkdir(parents=True, exist_ok=True)
         (root/"skills").mkdir(exist_ok=True)
         print("ForgeLine initialized. Next: forge agent claude|codex, then forge expand <feature>")
@@ -138,7 +154,17 @@ def main(argv=None):
         print(json.dumps(LearningKernel(root).policy_summary(), indent=2))
     elif a.cmd == "qa":
         from .gates.qa_audit import qa_audit
-        r = qa_audit(root)
+        from .source_scope import declared_paths
+        from .ssat import load_ssat
+        if not a.repo_wide and not a.ssat:
+            print(json.dumps({"passed": False, "error": {
+                "code": "E_SCOPE_REQUIRED",
+                "message": "feature QA requires --ssat; use --repo-wide only for an explicitly non-gating inventory",
+                "next": "forge qa <feature> --ssat <feature.ssat.yaml> --root .",
+            }}, indent=2))
+            raise SystemExit(2)
+        source_paths = None if a.repo_wide else declared_paths(root, load_ssat(Path(a.ssat)))
+        r = qa_audit(root, source_paths=source_paths)
         print(json.dumps({"grade": r.grade, "passed": r.passed, "metrics": r.metrics,
                           "findings": r.findings,
                           "attribution": r.attribution.to_dict()}, indent=2))

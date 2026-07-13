@@ -293,6 +293,98 @@ def _typescript_erosion(module: dict, path: Path, names: dict, allowed: set[tupl
     return violations
 
 
+def _symbol_region(source: str, path: Path, symbol: str, max_lines: int) -> str | None:
+    """Return one bounded declared function body for an invariant regex.
+
+    Regex policy checks are deliberately never allowed to search a whole module:
+    a reviewed module, symbol, and maximum span form the enforcement boundary.
+    """
+    lines = source.splitlines(keepends=True)
+    if path.suffix.lower() == ".py":
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == symbol:
+                start, end = node.lineno, node.end_lineno or node.lineno
+                if end - start + 1 > max_lines:
+                    return None
+                return "".join(lines[start - 1:end])
+        return None
+    match = re.search(
+        rf"(?:export\s+)?(?:async\s+)?function\s+{re.escape(symbol)}\s*\([^)]*\)[^{{]*{{",
+        source,
+        flags=re.MULTILINE,
+    )
+    if match is None:
+        return None
+    start = match.start()
+    brace = source.find("{", start)
+    depth = 0
+    for index in range(brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                region = source[start:index + 1]
+                return region if region.count("\n") + 1 <= max_lines else None
+    return None
+
+
+def _invariant_violations(ssat: dict, src_dir: Path, names: dict[str, dict]) -> list[ArchViolation]:
+    violations: list[ArchViolation] = []
+    for invariant in ssat.get("invariants", []):
+        name = invariant.get("name", "unnamed_invariant")
+        pattern = invariant.get("forbid_pattern")
+        raw_scopes = invariant.get("scopes") or ([invariant["scope"]] if isinstance(invariant.get("scope"), dict) else [])
+        if not isinstance(pattern, str) or not raw_scopes:
+            violations.append(ArchViolation("E_INVARIANT_SCOPE", f"{name}: invariants require forbid_pattern and at least one bounded scope"))
+            continue
+        try:
+            compiled = re.compile(pattern)
+        except re.error as error:
+            violations.append(ArchViolation("E_INVARIANT_SCOPE", f"{name}: invalid forbid_pattern: {error}"))
+            continue
+        for scope in raw_scopes:
+            if not isinstance(scope, dict):
+                violations.append(ArchViolation("E_INVARIANT_SCOPE", f"{name}: scope must be an object"))
+                continue
+            module_name = scope.get("module")
+            module = names.get(module_name) if isinstance(module_name, str) else None
+            symbol = scope.get("symbol")
+            max_lines = scope.get("max_lines")
+            if module is None or not isinstance(symbol, str) or not isinstance(max_lines, int) or not 1 <= max_lines <= 1000:
+                violations.append(ArchViolation(
+                    "E_INVARIANT_SCOPE",
+                    f"{name}: scope requires declared module, symbol, and max_lines between 1 and 1000",
+                    str(module_name or ""),
+                ))
+                continue
+            path = src_dir / module["path"]
+            try:
+                source = path.read_text(encoding="utf-8")
+            except OSError as error:
+                violations.append(ArchViolation("E_INVARIANT_SCOPE", f"{name}: cannot read scoped module: {type(error).__name__}", module["path"]))
+                continue
+            region = _symbol_region(source, path, symbol, max_lines)
+            if region is None:
+                violations.append(ArchViolation(
+                    "E_INVARIANT_SCOPE",
+                    f"{name}: cannot resolve bounded symbol {module_name}.{symbol}",
+                    module["path"],
+                ))
+                continue
+            if compiled.search(region):
+                violations.append(ArchViolation(
+                    "E_INVARIANT",
+                    f"{name}: forbidden pattern {pattern!r} in scoped symbol {module_name}.{symbol}",
+                    module["path"],
+                ))
+    return violations
+
+
 def check_erosion(ssat: dict, src_dir: Path) -> list[ArchViolation]:
     """Detect signature drift and illegal dependency edges per source language."""
     src_dir = Path(src_dir)
@@ -336,10 +428,5 @@ def check_erosion(ssat: dict, src_dir: Path) -> list[ArchViolation]:
                     target_name = target["name"] if target else None
                     if target_name and target_name != this and (this, target_name) not in allowed:
                         violations.append(ArchViolation("E_ILLEGAL_DEP", f"{this} -> {target_name} not in SSAT dependency allowlist", module["path"]))
-    for invariant in ssat.get("invariants", []):
-        pattern = invariant["forbid_pattern"]
-        for module in ssat.get("modules", []):
-            path = src_dir / module["path"]
-            if path.exists() and re.search(pattern, path.read_text(encoding="utf-8")):
-                violations.append(ArchViolation("E_INVARIANT", f"{invariant['name']}: forbidden pattern {pattern!r}", module["path"]))
+    violations.extend(_invariant_violations(ssat, src_dir, names))
     return violations

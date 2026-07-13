@@ -24,7 +24,11 @@ def verify_typescript_tests(root: Path, feature: str, manifest_path: Path | None
         return GateResult(False, Attribution("verify_tests_ts", 1, 0, [UnitResult("typescript:manifest", "verify_tests_ts", False, "TypeScript mutant manifest declares no reviewed mutants", FailureClass.HOLLOW_MANIFEST)]))
     tmp = Path(tempfile.mkdtemp(prefix="forge-ts-mutant-"))
     try:
-        shutil.copytree(root, tmp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", "node_modules", "dist", "build", ".next", "coverage", ".forge"))
+        shutil.copytree(root, tmp, dirs_exist_ok=True, ignore=shutil.ignore_patterns(
+            ".git", ".pnpm", "node_modules", "dist", "build", ".next", ".nuxt",
+            "coverage", ".forge", ".cache", "cache", "out", "output", "target",
+            ".venv", "venv", "__pycache__",
+        ))
         units = []
         for mutant in mutants:
             required = ("name", "path", "replace_regex", "command")

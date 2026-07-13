@@ -7,13 +7,11 @@ import re
 
 import yaml
 
-
-IGNORED = {".git", "node_modules", "dist", "build", ".next", "coverage", ".forge", ".venv", "venv"}
+from .source_scope import iter_source_files
 
 
 def _files(root: Path, suffixes: set[str]) -> list[Path]:
-    return [path for path in root.rglob("*") if path.is_file() and path.suffix in suffixes
-            and not any(part in IGNORED for part in path.parts)]
+    return iter_source_files(root, suffixes=suffixes)
 
 
 def _functions(path: Path, language: str) -> list[dict]:

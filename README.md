@@ -189,7 +189,7 @@ the build. Full PRD-to-production traceability, enforced — not documented.
 
 ForgeLine now audits quality quantitatively and **learns from its own runs**:
 
-**Deep QA audit** (`forge qa`) grades every build on coverage-intent (do tests
+**Deep QA audit** (`forge qa <feature> --ssat <feature.ssat.yaml>`) grades the declared feature slice on coverage-intent (do tests
 actually call the functions?), cyclomatic complexity, a scored security surface
 (eval/exec/shell/secrets/weak-crypto), and documentation — a composite A–F grade
 that gates shipping. A pretty build with untested, over-complex, or insecure
@@ -211,6 +211,44 @@ cycle in 15 seconds.
 **Escalating refine loop** — the review loop now gets stricter each attempt
 (normal → elevated "fix all findings" → final "human review required") instead
 of a flat retry cap.
+
+## v0.10 - Safe feature QA and provenance
+
+ForgeLine now treats an SSAT as the ownership boundary for a gate. `forge review`
+uses only its declared source modules for adversarial and QA findings; unrelated
+repository observations do not decide a feature result. Run the same scoped
+check directly with:
+
+```bash
+forge qa my-feature --ssat specs/my-feature.ssat.yaml --root . --strict
+```
+
+`forge qa --repo-wide --root .` remains available for an explicit inventory,
+but is labeled `repo_wide` in its receipt and is not a substitute for reviewed
+feature evidence. Dependency, build, cache, virtual-environment, and generated
+receipt trees are pruned before either scan. Disappearing optional paths are
+reported as skipped instead of crashing the gate.
+
+Source parsing is extension-aware: Python uses its AST; JavaScript and
+TypeScript use Node/TypeScript when available. An unavailable parser is reported
+as `parser_unsupported`, never misreported as Python syntax. Complexity above
+the hard threshold (10) cannot receive a passing grade.
+
+Regex invariants must declare a reviewed bounded scope: SSAT module, symbol,
+and `max_lines`. An unscoped pattern blocks as `E_INVARIANT_SCOPE`; a match in
+the bounded symbol blocks as `E_INVARIANT`. This prevents a broad regex from
+accidentally judging unrelated code.
+
+Every installed CLI can identify the running package without guessing from a
+checkout:
+
+```bash
+forge --version --json
+forge version --json
+```
+
+The JSON includes package/version, install origin, Python version, and explicit
+`null` values when a source commit or build hash was not embedded in the wheel.
 
 ## The five-brick factory
 
@@ -321,7 +359,7 @@ the mutant is the real generated stub.
 ## Failure attribution and refinement
 
 ForgeLine 0.5 reports review, architecture, QA, smoke, and intent failures at
-their smallest actionable unit. `forge qa --root .` includes function-level
+their smallest actionable unit. `forge qa <feature> --ssat <feature.ssat.yaml>` includes function-level
 metrics and attribution in its JSON output.
 
 The refinement engine accepts exactly one proposed edit at a time. Structural

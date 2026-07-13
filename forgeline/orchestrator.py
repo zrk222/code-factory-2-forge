@@ -10,6 +10,7 @@ from .run_store import RunStore
 from .ssat import ScaffoldError, load_ssat, scaffold_from_ssat, check_erosion
 from .gates import judge_consistency, grumpy_review, skill_check
 from .gates.qa_audit import qa_audit
+from .source_scope import declared_paths
 from .skill_memory import record_lesson, inject_lessons_block, lessons_for
 from .learning import LearningKernel
 from .attribution import Attribution, FailureClass, UnitResult
@@ -44,6 +45,21 @@ def _gate_attribution(stage: str, checks: list[tuple[str, bool, str, FailureClas
     ]
     return Attribution(stage, len(units), sum(unit.passed for unit in units), units).to_dict()
 
+
+def _judge_failure_class(findings: list[str]) -> FailureClass:
+    """Report the earliest causal class instead of calling every failure a stub."""
+    prefixes = (
+        ("J_STUB", FailureClass.STUB_UNFILLED),
+        ("J_PARSER_UNSUPPORTED", FailureClass.PARSER_UNSUPPORTED),
+        ("J_SYNTAX", FailureClass.SYNTAX_ERROR),
+        ("J_ARCH E_INVARIANT", FailureClass.INVARIANT_VIOLATION),
+        ("J_ARCH", FailureClass.SIGNATURE_DRIFT),
+    )
+    for prefix, failure_class in prefixes:
+        if any(finding.startswith(prefix) for finding in findings):
+            return failure_class
+    return FailureClass.INCONSISTENT_LOGIC
+
 class Orchestrator:
     def __init__(self, root: Path, feature: str):
         self.root = Path(root); self.feature = feature
@@ -71,7 +87,7 @@ class Orchestrator:
         ok, findings = judge_consistency(ssat, self.root)
         attr = _gate_attribution("fill", [
             ("implementation", ok, "all declared bodies implemented" if ok else " | ".join(findings),
-             FailureClass.STUB_UNFILLED),
+             _judge_failure_class(findings)),
         ])
         self.store.receipt(phase="fill", passed=ok, findings=findings, attribution=attr)
         if not ok:
@@ -121,9 +137,10 @@ class Orchestrator:
         attempt = self.store.bump_attempt("review")
         kernel = LearningKernel(self.root)
         j_ok, j = judge_consistency(ssat, self.root)
-        g_ok, g = grumpy_review(self.root)
+        feature_paths = declared_paths(self.root, ssat)
+        g_ok, g = grumpy_review(self.root, source_paths=feature_paths)
         erosion = check_erosion(ssat, self.root)
-        qa = qa_audit(self.root)                       # STRICTER: quantitative QA grade
+        qa = qa_audit(self.root, source_paths=feature_paths)
         all_findings = j + g + [f"{v.code} {v.message}" for v in erosion] + qa.findings
         all_ok = j_ok and g_ok and not erosion and qa.passed
         review_attr = _gate_attribution("review", [
@@ -133,9 +150,9 @@ class Orchestrator:
              FailureClass.SECURITY_FINDING),
             ("architecture", not erosion, "no erosion" if not erosion else
              " | ".join(f"{v.code} {v.message}" for v in erosion),
-             FailureClass.SIGNATURE_DRIFT),
+             FailureClass.INVARIANT_VIOLATION if any(v.code.startswith("E_INVARIANT") for v in erosion) else FailureClass.SIGNATURE_DRIFT),
             ("qa_audit", qa.passed, f"grade={qa.grade}; metrics={qa.metrics}",
-             FailureClass.COMPLEXITY_EXCEEDED),
+             qa.attribution.dominant_failure_class() or FailureClass.COMPLEXITY_EXCEEDED),
         ])
 
         # recursive learning: measure whether active constraints caught failures

@@ -22,5 +22,16 @@ dependencies:
 invariants:
   - name: no_eval
     forbid_pattern: "\\beval\\("
+    scopes:
+      - module: formatter
+        symbol: format_message
+        max_lines: 40
   - name: no_hardcoded_secret
     forbid_pattern: "(?i)api_key\\s*=\\s*['\"]"
+    scopes:
+      - module: formatter
+        symbol: format_message
+        max_lines: 40
+      - module: sender
+        symbol: send
+        max_lines: 40

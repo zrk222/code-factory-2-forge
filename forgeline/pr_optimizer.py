@@ -25,11 +25,11 @@ def optimize_pr(root: Path, feature: str | None = None, *, base: str = "main") -
         path for path in changed
         if any(part in path.replace("\\", "/").lower() for part in ("auth", "security", "billing", "deploy", "workflow"))
     ]
-    commands = [
-        "forge qa --strict",
-        "forge lessons",
-        "factory optimize-pr --json",
-    ]
+    commands = ["forge lessons", "factory optimize-pr --json"]
+    if feature:
+        commands.insert(0, f"forge qa {feature} --ssat <{feature}.ssat.yaml> --strict")
+    else:
+        commands.insert(0, "forge qa --repo-wide --strict")
     if feature:
         commands.extend([f"forge status {feature}", f"factory pr-pack {feature}"])
     return {
