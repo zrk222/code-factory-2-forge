@@ -11,7 +11,7 @@ from . import __version__
 
 def provenance() -> dict:
     """Return only facts available from the active installed distribution."""
-    install_origin = "source-tree"
+    install_origin = "unknown"
     direct_url: dict | None = None
     try:
         distribution = importlib.metadata.distribution("code-factory-2-forge")
