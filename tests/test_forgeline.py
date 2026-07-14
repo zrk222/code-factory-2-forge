@@ -105,6 +105,19 @@ def test_typescript_ssat_generates_typescript_and_compiles_when_tsc_is_available
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+def test_mjs_ssat_generates_valid_esm_without_python_syntax(proj):
+    report = scaffold_from_ssat(_typescript_ssat(["src/memory.mjs"]), proj)
+    target = proj / "src" / "memory.mjs"
+    source = target.read_text(encoding="utf-8")
+    assert len(report) == 1
+    assert "export function render(name)" in source
+    assert "def render" not in source
+    node = shutil.which("node")
+    if node is not None:
+        completed = subprocess.run([node, "--check", str(target)], capture_output=True, text=True)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 def test_mixed_language_ssat_generates_each_language_and_rejects_unknown_extensions(proj):
     report = scaffold_from_ssat(_typescript_ssat(["src/memory.ts", "src/worker.py"]), proj)
     assert len(report.created) == 2
@@ -317,6 +330,39 @@ def test_qa_feature_slice_ignores_unrelated_python_and_never_python_parses_mjs(p
     assert not any("bad.py" in finding for finding in report.findings)
 
 
+def test_mjs_qa_extracts_esm_and_local_symbols_with_measured_coverage(proj):
+    from forgeline.gates.qa_audit import qa_audit
+
+    feature = proj / "services" / "memory.mjs"
+    feature.parent.mkdir()
+    feature.write_text(
+        "/** Recall a saved value. */\n"
+        "export function recall(id) { if (!id) return null; return id; }\n"
+        "const normalize = (value) => value.trim();\n",
+        encoding="utf-8",
+    )
+    tests = proj / "services" / "memory.test.mjs"
+    tests.write_text("import { recall } from './memory.mjs';\nrecall('x'); normalize?.(' x ');\n", encoding="utf-8")
+
+    report = qa_audit(proj, source_paths=[feature])
+    names = {metric["function"].split(":")[-1] for metric in report.function_metrics}
+    assert {"recall", "normalize"} <= names
+    assert report.coverage_intent is not None and report.coverage_intent > 0
+    assert report.metrics["coverage_assessment"] == "measured"
+    assert not any("PARSER_UNSUPPORTED" in finding or "QA_SYNTAX" in finding for finding in report.findings)
+
+
+def test_mjs_invalid_syntax_is_not_misattributed_as_python_error(proj):
+    from forgeline.source_scope import analyze_source
+
+    feature = proj / "services" / "broken.mjs"
+    feature.parent.mkdir()
+    feature.write_text("export function broken( {\n", encoding="utf-8")
+    parsed = analyze_source(feature, proj)
+    assert parsed["language"] == "javascript"
+    assert parsed["status"] == "syntax_error"
+
+
 def test_qa_complexity_threshold_is_hard_and_cannot_pass_with_grade_b(proj):
     from forgeline.gates.qa_audit import qa_audit
 
@@ -390,7 +436,7 @@ def test_cli_requires_feature_scope_and_reports_machine_provenance(proj, capsys)
     main(["version", "--json"])
     provenance = json.loads(capsys.readouterr().out)
     assert provenance["package"] == "code-factory-2-forge"
-    assert provenance["version"] == "0.10.2"
+    assert provenance["version"] == "0.10.3"
     assert {"source_commit", "build_hash", "install_origin", "python"} <= provenance.keys()
 
 def test_learning_kernel_promotes_recurring_lessons(proj):
@@ -588,6 +634,21 @@ def test_verify_tests_passes_real_behavioral_check(proj):
     assert r["verified"] is True
     assert o.store.state == State.TESTS_VERIFIED
     assert r["attribution"]["rate"] == 1.0
+
+
+def test_verify_tests_invalidates_receipt_when_source_changes(proj):
+    o = _to_arch_gated(proj)
+    write_smoke_manifest(proj, passing=True)
+    first = o.verify_tests(proj / "notifier.ssat.yaml")
+    assert first["verified"] is True
+    target = proj / "slices" / "notifier" / "formatter.py"
+    target.write_text(target.read_text(encoding="utf-8") + "\n# source changed\n", encoding="utf-8")
+
+    second = o.verify_tests(proj / "notifier.ssat.yaml")
+    assert second["verified"] is True
+    assert second["input_fingerprint"] != first["input_fingerprint"]
+    cache = o.store.latest_receipt("verify_tests_cache")
+    assert cache is not None and cache["reason"] == "input fingerprint changed"
 
 
 def test_verify_tests_catches_assert_true_hollow_check(proj):

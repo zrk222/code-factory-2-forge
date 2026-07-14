@@ -3,7 +3,7 @@ governance and HSF for decision compilation when a spec carries a decision
 table. Everything is a receipt; every gate failure records a skill lesson and
 routes to the refine loop."""
 from __future__ import annotations
-import shutil, subprocess, sys
+import hashlib, json, shutil, subprocess, sys
 from pathlib import Path
 from .states import State, can_transition, IllegalTransition, HUMAN_GATES
 from .run_store import RunStore
@@ -14,6 +14,7 @@ from .source_scope import declared_paths
 from .skill_memory import record_lesson, inject_lessons_block, lessons_for
 from .learning import LearningKernel
 from .attribution import Attribution, FailureClass, UnitResult
+from . import __version__
 
 MAX_REFINE = 3
 
@@ -59,6 +60,29 @@ def _judge_failure_class(findings: list[str]) -> FailureClass:
         if any(finding.startswith(prefix) for finding in findings):
             return failure_class
     return FailureClass.INCONSISTENT_LOGIC
+
+
+def _verify_tests_fingerprint(root: Path, feature: str, ssat_path: Path) -> dict:
+    """Hash every verified input so stale reverse-classical receipts cannot pass."""
+    from .source_scope import iter_source_files
+    root = Path(root).resolve()
+    ssat_path = Path(ssat_path).resolve()
+    ssat = load_ssat(ssat_path)
+    components: dict[str, str] = {"ssat": hashlib.sha256(Path(ssat_path).read_bytes()).hexdigest()}
+    for path in declared_paths(root, ssat):
+        key = f"source:{path.relative_to(root).as_posix()}"
+        components[key] = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "MISSING"
+    smoke_paths = [root / "smoke" / f"{feature}.json", root / "smoke" / "smoke.json"]
+    for path in smoke_paths:
+        if path.exists():
+            components[f"smoke:{path.relative_to(root).as_posix()}"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    for path in iter_source_files(root):
+        if path.name.startswith("test_") or path.parent.name in {"tests", "test", "__tests__"} or ".test." in path.name or ".spec." in path.name:
+            components[f"test:{path.relative_to(root).as_posix()}"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    components["command"] = "forge verify-tests"
+    components["tool_version"] = __version__
+    canonical = json.dumps(components, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {"sha256": hashlib.sha256(canonical).hexdigest(), "components": components}
 
 class Orchestrator:
     def __init__(self, root: Path, feature: str):
@@ -274,17 +298,35 @@ class Orchestrator:
     def verify_tests(self, ssat_path: Path) -> dict:
         """Verify smoke checks can fail before trusting smoke results."""
         from .gates.reverse_classical import verify_tests
+        fingerprint = _verify_tests_fingerprint(self.root, self.feature, Path(ssat_path))
         if self.store.state == State.SHIPPED:
-            return {"verified": True, "note": "already shipped"}
+            previous = self.store.latest_receipt("verify_tests")
+            if previous and previous.get("input_fingerprint") == fingerprint["sha256"]:
+                return {"verified": True, "note": "already shipped", "input_fingerprint": fingerprint["sha256"]}
+            return {
+                "verified": False,
+                "reason": "shipped artifact has stale verify-tests evidence; open a new feature run",
+                "input_fingerprint": fingerprint["sha256"],
+                "previous_fingerprint": previous.get("input_fingerprint") if previous else None,
+            }
         if self.store.state in {State.TESTS_VERIFIED, State.SMOKED}:
-            return {"verified": True, "note": "already verified"}
+            previous = self.store.latest_receipt("verify_tests")
+            if previous and previous.get("input_fingerprint") == fingerprint["sha256"]:
+                return {"verified": True, "note": "already verified", "input_fingerprint": fingerprint["sha256"]}
+            # Source, tests, SSAT, command, or tool version changed. Invalidate
+            # downstream proof before rerunning rather than returning stale green.
+            self.store.set_state(State.ARCH_GATED, "verify-tests inputs changed; stale receipt invalidated")
+            self.store.receipt(phase="verify_tests_cache", verified=False,
+                               reason="input fingerprint changed", input_fingerprint=fingerprint["sha256"],
+                               previous_fingerprint=previous.get("input_fingerprint") if previous else None)
         if self.store.state not in {State.ARCH_GATED, State.BLOCKED}:
             return {"verified": False,
                     "reason": "architecture gate not passed - run `forge arch-gate` first"}
         gate = verify_tests(self.root, self.feature, Path(ssat_path))
         attr = gate.attribution.to_dict()
         if not gate.passed:
-            self.store.receipt(phase="verify_tests", verified=False, attribution=attr)
+            self.store.receipt(phase="verify_tests", verified=False, attribution=attr,
+                               input_fingerprint=fingerprint["sha256"], input_components=fingerprint["components"])
             if self.store.state != State.BLOCKED:
                 self._advance(State.BLOCKED, "reverse-classical test verification failed")
             return {"verified": False,
@@ -292,8 +334,10 @@ class Orchestrator:
                     "attribution": attr}
         self._advance(State.TESTS_VERIFIED, "smoke checks proven non-hollow",
                       attribution=attr)
-        self.store.receipt(phase="verify_tests", verified=True, attribution=attr)
-        return {"verified": True, "checks": gate.attribution.n_checked, "attribution": attr}
+        self.store.receipt(phase="verify_tests", verified=True, attribution=attr,
+                           input_fingerprint=fingerprint["sha256"], input_components=fingerprint["components"])
+        return {"verified": True, "checks": gate.attribution.n_checked, "attribution": attr,
+                "input_fingerprint": fingerprint["sha256"]}
 
     def refine(self, evaluate, propose, apply, revert, max_iters: int = 6) -> dict:
         """Run deterministic localized refinement.

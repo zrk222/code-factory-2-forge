@@ -3,14 +3,43 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import hashlib
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 from . import __version__
 
 
+def _source_commit(module_dir: Path) -> str | None:
+    """Return a checked-out source revision when one is actually available."""
+    for parent in (module_dir, *module_dir.parents):
+        if not (parent / ".git").exists():
+            continue
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=parent, capture_output=True,
+                text=True, timeout=3, check=False,
+            )
+        except OSError:
+            return None
+        return result.stdout.strip() if result.returncode == 0 else None
+    return None
+
+
+def _build_hash(module_dir: Path) -> str:
+    """Stable hash of the installed Python package payload, not a claimed commit."""
+    digest = hashlib.sha256()
+    for path in sorted(module_dir.rglob("*.py")):
+        digest.update(path.relative_to(module_dir).as_posix().encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
 def provenance() -> dict:
     """Return only facts available from the active installed distribution."""
+    module_dir = Path(__file__).resolve().parent
     install_origin = "unknown"
     direct_url: dict | None = None
     try:
@@ -19,17 +48,19 @@ def provenance() -> dict:
         if metadata_path.name.endswith(".egg-info"):
             install_origin = "source-tree"
         installed_module = Path(distribution.locate_file("forgeline")).resolve()
-        if installed_module != Path(__file__).resolve().parent:
+        if installed_module != module_dir:
             return {
                 "schema": "forgeline.provenance.v1",
                 "package": "code-factory-2-forge",
                 "version": __version__,
                 "source_commit": None,
-                "build_hash": None,
+                "build_hash": _build_hash(module_dir),
                 "install_origin": "source-tree",
                 "direct_url": None,
                 "python": sys.version.split()[0],
+                "runtime": {"python": sys.version.split()[0], "implementation": sys.implementation.name},
                 "receipt_schema": "forge.receipt.v1",
+                "identity_complete": False,
             }
         direct_url_text = distribution.read_text("direct_url.json")
         if direct_url_text:
@@ -39,14 +70,18 @@ def provenance() -> dict:
             install_origin = "site-packages"
     except importlib.metadata.PackageNotFoundError:
         pass
+    source_commit = _source_commit(module_dir)
+    build_hash = _build_hash(module_dir)
     return {
         "schema": "forgeline.provenance.v1",
         "package": "code-factory-2-forge",
         "version": __version__,
-        "source_commit": None,
-        "build_hash": None,
+        "source_commit": source_commit,
+        "build_hash": build_hash,
         "install_origin": install_origin,
         "direct_url": direct_url.get("url") if direct_url else None,
         "python": sys.version.split()[0],
+        "runtime": {"python": sys.version.split()[0], "implementation": sys.implementation.name},
         "receipt_schema": "forge.receipt.v1",
+        "identity_complete": bool(source_commit and build_hash),
     }

@@ -80,7 +80,15 @@ class ScaffoldReport:
         }
 
 
-_LANGUAGE_BY_SUFFIX = {".py": "python", ".ts": "typescript", ".tsx": "typescript"}
+_LANGUAGE_BY_SUFFIX = {
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+}
 
 
 def load_ssat(path: Path) -> dict:
@@ -147,11 +155,39 @@ def _render_typescript(module: dict) -> str:
     return "\n".join(lines)
 
 
+def _javascript_args(args: list[str]) -> str:
+    """Remove TypeScript-only annotations while preserving ordinary JS syntax."""
+    cleaned: list[str] = []
+    for arg in args:
+        value = arg.split(":", 1)[0].strip().rstrip("?")
+        if not value:
+            raise ValueError("JavaScript SSAT arguments must include a parameter name")
+        cleaned.append(value)
+    return ", ".join(cleaned)
+
+
+def _render_javascript(module: dict) -> str:
+    lines = ["/** AUTO-SCAFFOLD from SSAT. Fill bodies only; do not change signatures. */"]
+    lines.extend(_typescript_import(imp) for imp in module.get("imports", []))
+    lines.append("")
+    for function in module.get("functions", []):
+        lines.extend([
+            f"/** {function.get('doc', 'TODO')} */",
+            f"export function {function['name']}({_javascript_args(function.get('args', []))}) {{",
+            '  throw new Error("NotImplementedError: FILL");',
+            "}",
+            "",
+        ])
+    return "\n".join(lines)
+
+
 def _render_module(module: dict, target: Path) -> str:
     language = _language_for(target)
     if language == "python":
         return _render_python(module)
-    return _render_typescript(module)
+    if language == "typescript":
+        return _render_typescript(module)
+    return _render_javascript(module)
 
 
 def _validate_generated_source(source: str, target: Path) -> None:
@@ -160,10 +196,17 @@ def _validate_generated_source(source: str, target: Path) -> None:
         ast.parse(source)
         return
     if re.search(r"^\s*def\s+", source, flags=re.MULTILINE) or source.count("{") != source.count("}"):
-        raise ValueError(f"generated invalid TypeScript for {target}")
+        raise ValueError(f"generated invalid {language} for {target}")
     for line in source.splitlines():
-        if "export function " in line and not re.search(r"export function \w+\(.*\):\s*[^\s]+\s*\{", line):
-            raise ValueError(f"generated invalid TypeScript signature for {target}")
+        if "export function " not in line:
+            continue
+        signature = (
+            r"export function \w+\(.*\):\s*[^\s]+\s*\{"
+            if language == "typescript"
+            else r"export function \w+\(.*\)\s*\{"
+        )
+        if not re.search(signature, line):
+            raise ValueError(f"generated invalid {language} signature for {target}")
 
 
 def scaffold_from_ssat(
@@ -268,8 +311,8 @@ def _module_of(path: str, ssat: dict) -> str | None:
     return None
 
 
-def _typescript_erosion(module: dict, path: Path, names: dict, allowed: set[tuple[str, str]]) -> list[ArchViolation]:
-    """A TypeScript-specific structure check. Python's AST is never used here."""
+def _javascript_erosion(module: dict, path: Path, names: dict, allowed: set[tuple[str, str]]) -> list[ArchViolation]:
+    """A JavaScript/TypeScript structure check. Python's AST is never used here."""
     source = path.read_text(encoding="utf-8")
     violations: list[ArchViolation] = []
     if re.search(r"^\s*def\s+", source, flags=re.MULTILINE) or source.count("{") != source.count("}"):
@@ -401,8 +444,8 @@ def check_erosion(ssat: dict, src_dir: Path) -> list[ArchViolation]:
         except ValueError as exc:
             violations.append(ArchViolation("E_UNSUPPORTED_LANGUAGE", str(exc), module["path"]))
             continue
-        if language == "typescript":
-            violations.extend(_typescript_erosion(module, path, names, allowed))
+        if language in {"typescript", "javascript"}:
+            violations.extend(_javascript_erosion(module, path, names, allowed))
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))

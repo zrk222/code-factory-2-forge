@@ -117,9 +117,24 @@ files and includes before/after SHA-256 values. Existing targets are reported as
 conflicts and leave both the files and feature state unchanged. An intentional
 replacement requires `--force`; ForgeLine first writes timestamped backups under
 `.forge/scaffold-backups/`, validates every generated file, and restores every
-modified target if any replacement fails. Python, TypeScript, and TSX scaffolds
-use extension-specific generators and structure checks; unsupported extensions
-are rejected rather than receiving Python syntax.
+modified target if any replacement fails. Python, JavaScript (including ESM
+`.mjs`), TypeScript, and TSX scaffolds use extension-specific generators and
+structure checks; unsupported extensions are rejected rather than receiving
+Python syntax.
+
+**Feature-scoped, language-aware QA.** `forge qa <feature> --ssat <contract>`
+only grades files declared by that contract. Dependency, build, cache, VCS, and
+reparse-point trees are pruned. Python is parsed with Python; JavaScript/ESM is
+syntax-checked by Node and inventories exported and local functions; TypeScript
+uses its matching parser. An unavailable parser is reported as
+`PARSER_UNSUPPORTED`, never disguised as a syntax error. A slice without
+discoverable functions is explicitly inventory-only, not behavioral-proof green.
+
+**Fresh proof inputs.** `forge verify-tests` hashes its SSAT, declared source,
+smoke manifests, tests, command, and tool version. Any mismatch invalidates the
+prior reverse-classical receipt and reruns the proof. Inspect the active binary
+with `forge version --json`; it reports version, origin, build hash, runtime,
+and whether source identity is complete.
 
 **The grumpy adversary.** A review agent that *assumes your code is broken and
 insecure* and makes the generator prove otherwise. Executable heuristics catch
@@ -164,6 +179,8 @@ forge arch-gate <feature> <ssat>    architecture CI gate
 forge verify-tests <feature> <ssat>  prove smoke checks fail on generated stubs
 forge verify-tests-ts <feature>      prove existing TypeScript tests fail on reviewed source mutants
 forge challenge <feature> <ssat>     write a Factory Passport challenge receipt
+forge qa <feature> --ssat <ssat> --strict  run scoped language-aware QA
+forge version --json                 print install and build provenance
 forge smoke <feature>                runtime behavior gate
 forge ship <feature>                seal it
 forge handoff <feature> <spec>      route decision tables to HSF

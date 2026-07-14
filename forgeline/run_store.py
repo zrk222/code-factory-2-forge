@@ -41,3 +41,17 @@ class RunStore:
         fields = {"h": hashlib.sha256(line.encode()).hexdigest()[:12], **fields}
         with self.receipts.open("a") as f:
             f.write(json.dumps(fields, sort_keys=True) + "\n")
+
+    def latest_receipt(self, phase: str) -> dict | None:
+        """Return the most recent receipt for one phase without trusting state."""
+        if not self.receipts.exists():
+            return None
+        latest = None
+        for line in self.receipts.read_text(encoding="utf-8").splitlines():
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if item.get("phase") == phase:
+                latest = item
+        return latest

@@ -14,10 +14,10 @@ COMPLEXITY_LIMIT = 10
 
 @dataclass
 class QAReport:
-    coverage_intent: float = 0.0
+    coverage_intent: float | None = 0.0
     max_complexity: int = 0
     security_score: int = 100
-    doc_ratio: float = 0.0
+    doc_ratio: float | None = 0.0
     grade: str = "F"
     findings: list[str] = field(default_factory=list)
     metrics: dict = field(default_factory=dict)
@@ -52,9 +52,6 @@ class QAReport:
                 units.append(UnitResult(f"qa_audit:{finding.split()[1]}", "qa_audit", False, finding, FailureClass.PARSER_UNSUPPORTED))
             elif finding.startswith("QA_SYNTAX"):
                 units.append(UnitResult(f"qa_audit:{finding.split()[1]}", "qa_audit", False, finding, FailureClass.SYNTAX_ERROR))
-        if not units:
-            units.append(UnitResult("qa_audit:<no-public-functions>", "qa_audit", False,
-                                    "no supported public functions were available to grade", FailureClass.PARSER_UNSUPPORTED))
         return Attribution("qa_audit", len(units), sum(unit.passed for unit in units), units)
 
 
@@ -130,20 +127,26 @@ def qa_audit(src_dir: Path, *, source_paths: Iterable[Path] | None = None) -> QA
                 report.security_score -= deduction
                 report.findings.append(f"QA_SEC[{severity}] {message} in {path.relative_to(root).as_posix()}")
 
-    count = len(report.function_metrics) or 1
-    report.coverage_intent = round(sum(metric["tested"] for metric in report.function_metrics) / count, 2)
-    report.doc_ratio = round(sum(metric["documented"] for metric in report.function_metrics) / count, 2)
+    count = len(report.function_metrics)
+    report.coverage_intent = round(sum(metric["tested"] for metric in report.function_metrics) / count, 2) if count else None
+    report.doc_ratio = round(sum(metric["documented"] for metric in report.function_metrics) / count, 2) if count else None
     report.max_complexity = max((metric["complexity"] for metric in report.function_metrics), default=0)
     report.security_score = max(report.security_score, 0)
     for metric in report.function_metrics:
         if metric["complexity"] > COMPLEXITY_LIMIT:
             report.findings.append(f"QA_COMPLEXITY {metric['function']} complexity {metric['complexity']} > {COMPLEXITY_LIMIT}; policy=hard")
 
-    score = 35 * report.coverage_intent
+    # A source slice with no declared functions has no coverage *claim*. It is
+    # syntax/security inventory only, rather than a synthetic zero-coverage D.
+    score = 35 * report.coverage_intent if report.coverage_intent is not None else 35
     score += 25 * (1 if report.max_complexity <= COMPLEXITY_LIMIT else max(0, 1 - (report.max_complexity - COMPLEXITY_LIMIT) / 10))
     score += 25 * (report.security_score / 100)
-    score += 15 * report.doc_ratio
+    score += 15 * report.doc_ratio if report.doc_ratio is not None else 15
     report.grade = "A" if score >= 85 else "B" if score >= 70 else "C" if score >= 55 else "D" if score >= 40 else "F"
+    # No executable symbols means no behavioral proof, only a syntax/security
+    # inventory. Do not surface that inventory as an aggregate green result.
+    if not count and report.grade == "A":
+        report.grade = "B"
     if report.max_complexity > COMPLEXITY_LIMIT and report.grade in {"A", "B"}:
         report.grade = "C"
     if any(finding.startswith(("QA_SYNTAX", "QA_PARSER_UNSUPPORTED")) for finding in report.findings):
@@ -152,6 +155,8 @@ def qa_audit(src_dir: Path, *, source_paths: Iterable[Path] | None = None) -> QA
         "coverage_intent": report.coverage_intent, "max_complexity": report.max_complexity,
         "security_score": report.security_score, "doc_ratio": report.doc_ratio,
         "composite": round(score, 1), "complexity_policy": "hard",
+        "coverage_assessment": "measured" if count else "not_applicable_no_declared_functions",
+        "behavioral_proof_status": "available" if count else "unavailable_no_declared_functions",
         "scope": report.scope, "skipped_paths": report.skipped_paths,
     }
     return report
