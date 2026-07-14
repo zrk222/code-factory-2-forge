@@ -114,8 +114,12 @@ forge architect <feature> <ssat> --dry-run --root .
 
 The JSON report separates `created`, `skipped`, `conflicts`, and `overwritten`
 files and includes before/after SHA-256 values. Existing targets are reported as
-conflicts and leave both the files and feature state unchanged. An intentional
-replacement requires `--force`; ForgeLine first writes timestamped backups under
+conflicts and leave both the files and feature state unchanged. To bring an
+already-implemented feature under the contract without modifying its code, use
+`--adopt-existing`: ForgeLine validates declared signatures, dependencies, and
+invariants; records the unchanged target hashes as `adopted`; and scaffolds only
+modules that are absent. A mismatch returns `E_SCAFFOLD` without changing files
+or feature state. An intentional replacement requires `--force`; ForgeLine first writes timestamped backups under
 `.forge/scaffold-backups/`, validates every generated file, and restores every
 modified target if any replacement fails. Python, JavaScript (including ESM
 `.mjs`), TypeScript, and TSX scaffolds use extension-specific generators and
@@ -172,6 +176,7 @@ forge expand <feature>              draft use cases (→ human gate)
 forge gate architected <feature>    record explicit architecture approval
 forge architect <feature> <ssat> --dry-run  show create/conflict/overwrite plan without writes
 forge architect <feature> <ssat>            generate new files; existing files fail closed
+forge architect <feature> <ssat> --adopt-existing  validate and receipt implemented files; scaffold only missing targets
 forge architect <feature> <ssat> --force    back up then intentionally replace existing targets
 forge fill <feature> <ssat>         prove bodies are implemented; enter FILLED
 forge review <feature> <ssat>       judge + grumpy adversary + arch erosion (refine loop)

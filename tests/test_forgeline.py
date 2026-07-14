@@ -91,6 +91,148 @@ def test_existing_typescript_target_conflicts_without_force_and_preserves_hash(p
     assert orchestrator.store.state == State.ARCHITECTED
 
 
+def test_existing_typescript_target_adopts_without_mutation_and_records_hash(proj):
+    target = proj / "src" / "memory.ts"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "export function render(name: string): string { return name; }\n",
+        encoding="utf-8",
+    )
+    before = hashlib.sha256(target.read_bytes()).hexdigest()
+    spec = proj / "typescript.ssat.yaml"
+    spec.write_text(yaml.safe_dump(_typescript_ssat(["src/memory.ts"])), encoding="utf-8")
+    orchestrator = Orchestrator(proj, "notifier")
+    orchestrator.store.set_state(State.ARCHITECTED)
+
+    result = orchestrator.architect(spec, adopt_existing=True)
+
+    assert result["scaffolded"] is True
+    assert result["adopted_existing"] is True
+    assert result["ssat_sha256"] == hashlib.sha256(spec.read_bytes()).hexdigest()
+    assert result["report"]["created"] == []
+    adopted = result["report"]["adopted"]
+    assert len(adopted) == 1
+    assert adopted[0]["path"] == str(target)
+    assert adopted[0]["before_sha256"] == before
+    assert adopted[0]["after_sha256"] == before
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == before
+    assert orchestrator.store.state == State.SCAFFOLDED
+    receipt = json.loads(orchestrator.store.receipts.read_text(encoding="utf-8").splitlines()[-1])
+    assert receipt["adopted"][0]["before_sha256"] == before
+    assert receipt["ssat_sha256"] == result["ssat_sha256"]
+
+
+def test_adopt_existing_scaffolds_only_absent_targets(proj):
+    existing = proj / "src" / "implemented.ts"
+    existing.parent.mkdir(parents=True)
+    existing.write_text(
+        "export function render(name: string): string { return name; }\n",
+        encoding="utf-8",
+    )
+    before = hashlib.sha256(existing.read_bytes()).hexdigest()
+    spec = proj / "typescript.ssat.yaml"
+    spec.write_text(
+        yaml.safe_dump(_typescript_ssat(["src/implemented.ts", "src/new.ts"])),
+        encoding="utf-8",
+    )
+    orchestrator = Orchestrator(proj, "notifier")
+    orchestrator.store.set_state(State.ARCHITECTED)
+
+    result = orchestrator.architect(spec, adopt_existing=True)
+
+    assert [Path(item["path"]).name for item in result["report"]["adopted"]] == ["implemented.ts"]
+    assert [Path(item["path"]).name for item in result["report"]["created"]] == ["new.ts"]
+    assert hashlib.sha256(existing.read_bytes()).hexdigest() == before
+    assert "export function render(name: string): string" in (proj / "src" / "new.ts").read_text(encoding="utf-8")
+
+
+def test_adopt_existing_refuses_signature_drift_without_mutation_or_transition(proj):
+    target = proj / "src" / "memory.ts"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "export function render(value: string): string { return value; }\n",
+        encoding="utf-8",
+    )
+    before = hashlib.sha256(target.read_bytes()).hexdigest()
+    spec = proj / "typescript.ssat.yaml"
+    spec.write_text(yaml.safe_dump(_typescript_ssat(["src/memory.ts"])), encoding="utf-8")
+    orchestrator = Orchestrator(proj, "notifier")
+    orchestrator.store.set_state(State.ARCHITECTED)
+
+    result = orchestrator.architect(spec, adopt_existing=True)
+
+    assert result["scaffolded"] is False
+    assert result["error"]["code"] == "E_SCAFFOLD"
+    assert "E_SIG_DRIFT" in result["report"]["conflicts"][0]["detail"]
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == before
+    assert orchestrator.store.state == State.ARCHITECTED
+
+
+def test_adopt_existing_refuses_global_invariant_failure_without_adoption_receipt(proj):
+    target = proj / "src" / "memory.ts"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "export function render(name: string): string { return name; }\n",
+        encoding="utf-8",
+    )
+    before = hashlib.sha256(target.read_bytes()).hexdigest()
+    spec_data = _typescript_ssat(["src/memory.ts"])
+    spec_data["invariants"] = [{
+        "name": "no_return",
+        "forbid_pattern": "return",
+        "scopes": [{"module": "memory", "symbol": "render", "max_lines": 10}],
+    }]
+    spec = proj / "typescript.ssat.yaml"
+    spec.write_text(yaml.safe_dump(spec_data), encoding="utf-8")
+    orchestrator = Orchestrator(proj, "notifier")
+    orchestrator.store.set_state(State.ARCHITECTED)
+
+    result = orchestrator.architect(spec, adopt_existing=True)
+
+    assert result["scaffolded"] is False
+    assert result["error"]["code"] == "E_SCAFFOLD"
+    assert result["error"]["message"].startswith("SSAT adoption validation failed:")
+    assert result["report"]["adopted"] == []
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == before
+    assert orchestrator.store.state == State.ARCHITECTED
+
+
+def test_architect_force_and_adopt_existing_are_mutually_exclusive(proj):
+    target = proj / "src" / "memory.ts"
+    target.parent.mkdir(parents=True)
+    target.write_text("export const preserved = true;\n", encoding="utf-8")
+    before = target.read_bytes()
+    spec = proj / "typescript.ssat.yaml"
+    spec.write_text(yaml.safe_dump(_typescript_ssat(["src/memory.ts"])), encoding="utf-8")
+    orchestrator = Orchestrator(proj, "notifier")
+    orchestrator.store.set_state(State.ARCHITECTED)
+    from forgeline.cli import main
+
+    with pytest.raises(SystemExit) as exited:
+        main([
+            "architect", "notifier", str(spec), "--root", str(proj),
+            "--force", "--adopt-existing",
+        ])
+
+    assert exited.value.code == 2
+    assert target.read_bytes() == before
+    assert orchestrator.store.state == State.ARCHITECTED
+
+
+def test_architect_invalid_ssat_returns_structured_error_without_transition(proj):
+    spec = proj / "invalid.ssat.yaml"
+    spec.write_text("modules: [\n", encoding="utf-8")
+    orchestrator = Orchestrator(proj, "notifier")
+    orchestrator.store.set_state(State.ARCHITECTED)
+
+    result = orchestrator.architect(spec)
+
+    assert result["scaffolded"] is False
+    assert result["error"]["code"] == "E_SSAT"
+    assert result["error"]["message"].startswith("cannot read SSAT:")
+    assert orchestrator.store.state == State.ARCHITECTED
+
+
 def test_typescript_ssat_generates_typescript_and_compiles_when_tsc_is_available(proj):
     report = scaffold_from_ssat(_typescript_ssat(["src/memory.ts"]), proj)
     target = proj / "src" / "memory.ts"
@@ -436,7 +578,7 @@ def test_cli_requires_feature_scope_and_reports_machine_provenance(proj, capsys)
     main(["version", "--json"])
     provenance = json.loads(capsys.readouterr().out)
     assert provenance["package"] == "code-factory-2-forge"
-    assert provenance["version"] == "0.10.4"
+    assert provenance["version"] == "0.10.5"
     assert {"source_commit", "build_hash", "install_origin", "python"} <= provenance.keys()
 
 def test_learning_kernel_promotes_recurring_lessons(proj):

@@ -9,7 +9,7 @@ from .orchestrator import Orchestrator
 NEXT_ACTION = {
     State.INTENT: "forge expand <feature>  (draft use cases, then human signoff)",
     State.EXPANDED: "write/refine the SSAT, then: forge gate architected <feature>",
-    State.ARCHITECTED: "forge architect <feature> <ssat.yaml>  (generate scaffold)",
+    State.ARCHITECTED: "forge architect <feature> <ssat.yaml>  (generate scaffold; add --adopt-existing for implemented targets)",
     State.SCAFFOLDED: "implement function bodies + tests, then: forge fill <feature> <ssat.yaml>",
     State.FILLED: "forge review <feature> <ssat.yaml>",
     State.REVIEWED: "forge arch-gate <feature> <ssat.yaml>",
@@ -40,7 +40,13 @@ def main(argv=None):
             sp.add_argument("feature"); sp.add_argument("ssat", nargs="?"); sp.add_argument("--root", default=".")
             if name == "architect":
                 sp.add_argument("--dry-run", action="store_true", help="plan scaffold actions without writing files")
-                sp.add_argument("--force", action="store_true", help="overwrite existing targets after creating backups")
+                mode = sp.add_mutually_exclusive_group()
+                mode.add_argument("--force", action="store_true", help="overwrite existing targets after creating backups")
+                mode.add_argument(
+                    "--adopt-existing",
+                    action="store_true",
+                    help="validate and receipt existing targets; only scaffold missing targets",
+                )
         elif name == "adopt":
             sp.add_argument("feature"); sp.add_argument("--root", default="."); sp.add_argument("--out", default=None); sp.add_argument("--force", action="store_true")
         elif name == "verify-tests-ts":
@@ -94,7 +100,12 @@ def main(argv=None):
             raise SystemExit(1)
     elif a.cmd == "architect":
         o = Orchestrator(root, a.feature)
-        result = o.architect(Path(a.ssat), force=a.force, dry_run=a.dry_run)
+        result = o.architect(
+            Path(a.ssat),
+            force=a.force,
+            adopt_existing=a.adopt_existing,
+            dry_run=a.dry_run,
+        )
         print(json.dumps(result, indent=2))
         if not result["scaffolded"] and not a.dry_run:
             raise SystemExit(1)

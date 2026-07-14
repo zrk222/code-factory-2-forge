@@ -53,6 +53,7 @@ class ScaffoldFile:
 class ScaffoldReport:
     dry_run: bool
     created: list[ScaffoldFile] = field(default_factory=list)
+    adopted: list[ScaffoldFile] = field(default_factory=list)
     skipped: list[ScaffoldFile] = field(default_factory=list)
     conflicts: list[ScaffoldFile] = field(default_factory=list)
     overwritten: list[ScaffoldFile] = field(default_factory=list)
@@ -73,6 +74,7 @@ class ScaffoldReport:
         return {
             "dry_run": self.dry_run,
             "created": [item.to_dict() for item in self.created],
+            "adopted": [item.to_dict() for item in self.adopted],
             "skipped": [item.to_dict() for item in self.skipped],
             "conflicts": [item.to_dict() for item in self.conflicts],
             "overwritten": [item.to_dict() for item in self.overwritten],
@@ -214,19 +216,27 @@ def scaffold_from_ssat(
     out_dir: Path,
     *,
     force: bool = False,
+    adopt_existing: bool = False,
     dry_run: bool = False,
     backup_root: Path | None = None,
 ) -> ScaffoldReport:
     """Plan, validate, and atomically materialize a language-aware SSAT scaffold.
 
     Existing files are conflicts by default. ``force=True`` creates a timestamped
-    backup before an atomic replacement. No target is changed until every module
-    has rendered and validated; any write failure restores every earlier target.
+    backup before an atomic replacement. ``adopt_existing=True`` validates and
+    hash-records existing targets without changing them, while scaffolding only
+    modules that are absent. No target is changed until every module has rendered
+    and validated; any write failure restores every earlier target.
     """
     out_dir = Path(out_dir).resolve()
     report = ScaffoldReport(dry_run=dry_run)
+    if force and adopt_existing:
+        raise ScaffoldError("--force and --adopt-existing are mutually exclusive", report)
+
     plan: list[tuple[dict, Path, str, bytes | None]] = []
     seen: set[Path] = set()
+    names = {module["name"]: module for module in ssat.get("modules", [])}
+    allowed = {(edge["from"], edge["to"]) for edge in ssat.get("dependencies", [])}
 
     try:
         for module in ssat.get("modules", []):
@@ -239,25 +249,38 @@ def scaffold_from_ssat(
             source = _render_module(module, target)
             _validate_generated_source(source, target)
             previous = target.read_bytes() if target.exists() else None
-            action = "overwrite" if previous is not None and force else "conflict" if previous is not None else "create"
+            action = "overwrite" if previous is not None and force else "adopt" if previous is not None and adopt_existing else "conflict" if previous is not None else "create"
             item = ScaffoldFile(
                 path=str(target),
                 action=action,
                 before_sha256=_sha256_bytes(previous) if previous is not None else None,
                 after_sha256=_sha256_bytes(source.encode("utf-8")),
             )
-            if action == "conflict":
+            if action == "adopt":
+                violations = _module_erosion(module, target, names, allowed)
+                if violations:
+                    item.action = "conflict"
+                    item.detail = " | ".join(f"{violation.code} {violation.message}" for violation in violations)
+                    report.conflicts.append(item)
+                else:
+                    item.after_sha256 = item.before_sha256
+                    item.detail = "existing target verified against SSAT; bytes retained"
+                    report.adopted.append(item)
+            elif action == "conflict":
                 report.conflicts.append(item)
             elif action == "overwrite":
                 report.overwritten.append(item)
             else:
                 report.created.append(item)
-            plan.append((module, target, source, previous))
+            if action in {"create", "overwrite"}:
+                plan.append((module, target, source, previous))
     except (KeyError, TypeError, ValueError) as exc:
         raise ScaffoldError(str(exc), report) from exc
 
     if report.conflicts:
-        raise ScaffoldError("existing SSAT targets require --force", report)
+        if adopt_existing:
+            raise ScaffoldError("existing SSAT targets do not satisfy the declared contract", report)
+        raise ScaffoldError("existing SSAT targets require --force or --adopt-existing", report)
     if dry_run:
         return report
 
@@ -288,6 +311,12 @@ def scaffold_from_ssat(
 
         for temp, target in temp_paths:
             os.replace(temp, target)
+        if adopt_existing:
+            violations = check_erosion(ssat, out_dir)
+            if violations:
+                detail = " | ".join(f"{violation.code} {violation.message}" for violation in violations)
+                report.adopted.clear()
+                raise ValueError(f"adopted targets do not satisfy SSAT: {detail}")
         return report
     except Exception as exc:
         for target, backup in backups.items():
@@ -297,6 +326,8 @@ def scaffold_from_ssat(
             if target.exists() and target not in backups:
                 target.unlink()
         report.rollback_performed = bool(backups or created_targets)
+        if adopt_existing and isinstance(exc, ValueError) and str(exc).startswith("adopted targets do not satisfy SSAT:"):
+            raise ScaffoldError(f"SSAT adoption validation failed: {exc}", report) from exc
         raise ScaffoldError(f"scaffold transaction rolled back: {exc}", report) from exc
     finally:
         for temp, _ in temp_paths:
@@ -428,48 +459,53 @@ def _invariant_violations(ssat: dict, src_dir: Path, names: dict[str, dict]) -> 
     return violations
 
 
+def _module_erosion(module: dict, path: Path, names: dict[str, dict], allowed: set[tuple[str, str]]) -> list[ArchViolation]:
+    """Check one declared module without widening the scan beyond its SSAT scope."""
+    if not path.exists():
+        return [ArchViolation("E_MISSING_MODULE", f"{module['path']} declared in SSAT but absent")]
+    try:
+        language = _language_for(path)
+    except ValueError as exc:
+        return [ArchViolation("E_UNSUPPORTED_LANGUAGE", str(exc), module["path"])]
+    if language in {"typescript", "javascript"}:
+        return _javascript_erosion(module, path, names, allowed)
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError as exc:
+        return [ArchViolation("E_SYNTAX", str(exc), module["path"])]
+
+    violations: list[ArchViolation] = []
+    declared = {function["name"]: function for function in module.get("functions", [])}
+    found = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    for name, spec in declared.items():
+        if name not in found:
+            violations.append(ArchViolation("E_SIG_MISSING", f"{name} declared but not implemented", module["path"]))
+            continue
+        got_args = [arg.arg for arg in found[name].args.args]
+        want_args = [arg.split(":", 1)[0].strip() for arg in spec.get("args", [])]
+        if got_args != want_args:
+            violations.append(ArchViolation("E_SIG_DRIFT", f"{name}({got_args}) != SSAT ({want_args})", module["path"]))
+    this = module["name"]
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            imports = [alias.name for alias in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+            for imported in imports:
+                target = names.get(imported.split(".")[-1]) or names.get(imported)
+                target_name = target["name"] if target else None
+                if target_name and target_name != this and (this, target_name) not in allowed:
+                    violations.append(ArchViolation("E_ILLEGAL_DEP", f"{this} -> {target_name} not in SSAT dependency allowlist", module["path"]))
+    return violations
+
+
 def check_erosion(ssat: dict, src_dir: Path) -> list[ArchViolation]:
     """Detect signature drift and illegal dependency edges per source language."""
     src_dir = Path(src_dir)
-    violations: list[ArchViolation] = []
     allowed = {(edge["from"], edge["to"]) for edge in ssat.get("dependencies", [])}
     names = {module["name"]: module for module in ssat.get("modules", [])}
-    for module in ssat.get("modules", []):
-        path = src_dir / module["path"]
-        if not path.exists():
-            violations.append(ArchViolation("E_MISSING_MODULE", f"{module['path']} declared in SSAT but absent"))
-            continue
-        try:
-            language = _language_for(path)
-        except ValueError as exc:
-            violations.append(ArchViolation("E_UNSUPPORTED_LANGUAGE", str(exc), module["path"]))
-            continue
-        if language in {"typescript", "javascript"}:
-            violations.extend(_javascript_erosion(module, path, names, allowed))
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError as exc:
-            violations.append(ArchViolation("E_SYNTAX", str(exc), module["path"]))
-            continue
-        declared = {function["name"]: function for function in module.get("functions", [])}
-        found = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
-        for name, spec in declared.items():
-            if name not in found:
-                violations.append(ArchViolation("E_SIG_MISSING", f"{name} declared but not implemented", module["path"]))
-                continue
-            got_args = [arg.arg for arg in found[name].args.args]
-            want_args = [arg.split(":", 1)[0].strip() for arg in spec.get("args", [])]
-            if got_args != want_args:
-                violations.append(ArchViolation("E_SIG_DRIFT", f"{name}({got_args}) != SSAT ({want_args})", module["path"]))
-        this = module["name"]
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                imports = [alias.name for alias in node.names] if isinstance(node, ast.Import) else [node.module or ""]
-                for imported in imports:
-                    target = names.get(imported.split(".")[-1]) or names.get(imported)
-                    target_name = target["name"] if target else None
-                    if target_name and target_name != this and (this, target_name) not in allowed:
-                        violations.append(ArchViolation("E_ILLEGAL_DEP", f"{this} -> {target_name} not in SSAT dependency allowlist", module["path"]))
+    violations = [
+        violation
+        for module in ssat.get("modules", [])
+        for violation in _module_erosion(module, src_dir / module["path"], names, allowed)
+    ]
     violations.extend(_invariant_violations(ssat, src_dir, names))
     return violations

@@ -5,6 +5,7 @@ routes to the refine loop."""
 from __future__ import annotations
 import hashlib, json, shutil, subprocess, sys
 from pathlib import Path
+import yaml
 from .states import State, can_transition, IllegalTransition, HUMAN_GATES
 from .run_store import RunStore
 from .ssat import ScaffoldError, load_ssat, scaffold_from_ssat, check_erosion
@@ -21,7 +22,7 @@ MAX_REFINE = 3
 _NEXT_ACTION = {
     State.INTENT: "forge expand <feature> --root .",
     State.EXPANDED: "forge gate architected <feature> --root .",
-    State.ARCHITECTED: "forge architect <feature> <ssat.yaml> --root .",
+    State.ARCHITECTED: "forge architect <feature> <ssat.yaml> --root . (add --adopt-existing for implemented targets)",
     State.SCAFFOLDED: "forge fill <feature> <ssat.yaml> --root .",
     State.FILLED: "forge review <feature> <ssat.yaml> --root .",
     State.REVIEWED: "forge arch-gate <feature> <ssat.yaml> --root .",
@@ -121,7 +122,14 @@ class Orchestrator:
         self._advance(State.FILLED, "implemented bodies verified", attribution=attr)
         return {"filled": True, "attribution": attr}
 
-    def architect(self, ssat_path: Path, *, force: bool = False, dry_run: bool = False) -> dict:
+    def architect(
+        self,
+        ssat_path: Path,
+        *,
+        force: bool = False,
+        adopt_existing: bool = False,
+        dry_run: bool = False,
+    ) -> dict:
         """Safely materialize the SSAT scaffold only from an allowed state."""
         current = self.store.state
         if current not in {State.ARCHITECTED, State.BLOCKED}:
@@ -135,20 +143,46 @@ class Orchestrator:
                 },
             }
         try:
+            ssat_bytes = Path(ssat_path).read_bytes()
+            ssat = load_ssat(ssat_path)
+        except (OSError, yaml.YAMLError) as error:
+            return {
+                "scaffolded": False,
+                "error": {"code": "E_SSAT", "message": f"cannot read SSAT: {error}"},
+            }
+        if not isinstance(ssat, dict):
+            return {
+                "scaffolded": False,
+                "error": {"code": "E_SSAT", "message": "SSAT must be a YAML mapping"},
+            }
+        ssat_sha256 = hashlib.sha256(ssat_bytes).hexdigest()
+        try:
             report = scaffold_from_ssat(
-                load_ssat(ssat_path), self.root, force=force, dry_run=dry_run,
+                ssat,
+                self.root,
+                force=force,
+                adopt_existing=adopt_existing,
+                dry_run=dry_run,
             )
         except ScaffoldError as error:
             return {"scaffolded": False, "error": {"code": "E_SCAFFOLD", "message": str(error)},
                     "report": error.report.to_dict()}
-        result = {"scaffolded": not dry_run, "report": report.to_dict()}
+        result = {
+            "scaffolded": not dry_run,
+            "adopted_existing": adopt_existing,
+            "ssat_sha256": ssat_sha256,
+            "report": report.to_dict(),
+        }
         if dry_run:
             return result
         self._advance(
             State.SCAFFOLDED,
-            "scaffold from SSAT",
-            modules=len(load_ssat(ssat_path).get("modules", [])),
+            "adopt existing modules from SSAT" if adopt_existing else "scaffold from SSAT",
+            mode="adopt_existing" if adopt_existing else "scaffold",
+            ssat_sha256=ssat_sha256,
+            modules=len(ssat.get("modules", [])),
             created=[item.to_dict() for item in report.created],
+            adopted=[item.to_dict() for item in report.adopted],
             overwritten=[item.to_dict() for item in report.overwritten],
             skipped=[item.to_dict() for item in report.skipped],
         )
