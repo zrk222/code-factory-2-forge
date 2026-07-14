@@ -14,18 +14,20 @@ from . import __version__
 
 def _source_commit(module_dir: Path) -> str | None:
     """Return a checked-out source revision when one is actually available."""
-    for parent in (module_dir, *module_dir.parents):
-        if not (parent / ".git").exists():
-            continue
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "HEAD"], cwd=parent, capture_output=True,
-                text=True, timeout=3, check=False,
-            )
-        except OSError:
-            return None
-        return result.stdout.strip() if result.returncode == 0 else None
-    return None
+    source_root = module_dir.parent
+    manifest = source_root / "pyproject.toml"
+    if not (source_root / ".git").exists() or not manifest.exists():
+        return None
+    if 'name = "code-factory-2-forge"' not in manifest.read_text(encoding="utf-8"):
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=source_root, capture_output=True,
+            text=True, timeout=3, check=False,
+        )
+    except OSError:
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def _build_hash(module_dir: Path) -> str:
