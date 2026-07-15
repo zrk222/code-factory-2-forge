@@ -4,7 +4,6 @@ from __future__ import annotations
 import importlib.metadata
 import json
 import hashlib
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,9 +24,15 @@ def _source_commit(module_dir: Path) -> str | None:
             ["git", "rev-parse", "HEAD"], cwd=source_root, capture_output=True,
             text=True, timeout=3, check=False,
         )
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"], cwd=source_root,
+            capture_output=True, text=True, timeout=3, check=False,
+        )
     except OSError:
         return None
-    return result.stdout.strip() if result.returncode == 0 else None
+    if result.returncode != 0 or dirty.returncode != 0 or dirty.stdout.strip():
+        return None
+    return result.stdout.strip()
 
 
 def _build_hash(module_dir: Path) -> str:
@@ -49,21 +54,6 @@ def provenance() -> dict:
         metadata_path = Path(distribution._path).resolve()
         if metadata_path.name.endswith(".egg-info"):
             install_origin = "source-tree"
-        installed_module = Path(distribution.locate_file("forgeline")).resolve()
-        if installed_module != module_dir:
-            return {
-                "schema": "forgeline.provenance.v1",
-                "package": "code-factory-2-forge",
-                "version": __version__,
-                "source_commit": None,
-                "build_hash": _build_hash(module_dir),
-                "install_origin": "source-tree",
-                "direct_url": None,
-                "python": sys.version.split()[0],
-                "runtime": {"python": sys.version.split()[0], "implementation": sys.implementation.name},
-                "receipt_schema": "forge.receipt.v1",
-                "identity_complete": False,
-            }
         direct_url_text = distribution.read_text("direct_url.json")
         if direct_url_text:
             direct_url = json.loads(direct_url_text)

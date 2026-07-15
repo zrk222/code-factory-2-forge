@@ -13,6 +13,8 @@ from pathlib import Path
 
 import yaml
 
+from .source_scope import validate_generated_script
+
 
 @dataclass
 class ArchViolation:
@@ -197,18 +199,7 @@ def _validate_generated_source(source: str, target: Path) -> None:
     if language == "python":
         ast.parse(source)
         return
-    if re.search(r"^\s*def\s+", source, flags=re.MULTILINE) or source.count("{") != source.count("}"):
-        raise ValueError(f"generated invalid {language} for {target}")
-    for line in source.splitlines():
-        if "export function " not in line:
-            continue
-        signature = (
-            r"export function \w+\(.*\):\s*[^\s]+\s*\{"
-            if language == "typescript"
-            else r"export function \w+\(.*\)\s*\{"
-        )
-        if not re.search(signature, line):
-            raise ValueError(f"generated invalid {language} signature for {target}")
+    validate_generated_script(source, target)
 
 
 def scaffold_from_ssat(

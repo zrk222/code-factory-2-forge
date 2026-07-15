@@ -12,6 +12,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]" pytest
       - run: python -m pytest -q
@@ -30,4 +33,5 @@ jobs:
       - run: python -m pip install -e ".[dev]"
       - run: npm install --no-save --prefix .forge-tsc typescript@5
       - run: echo "${GITHUB_WORKSPACE}/.forge-tsc/node_modules/.bin" >> "$GITHUB_PATH"
+      - run: echo "NODE_PATH=${GITHUB_WORKSPACE}/.forge-tsc/node_modules" >> "$GITHUB_ENV"
       - run: python -m pytest -q tests/test_forgeline.py -k typescript

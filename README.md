@@ -123,14 +123,18 @@ or feature state. An intentional replacement requires `--force`; ForgeLine first
 `.forge/scaffold-backups/`, validates every generated file, and restores every
 modified target if any replacement fails. Python, JavaScript (including ESM
 `.mjs`), TypeScript, and TSX scaffolds use extension-specific generators and
-structure checks; unsupported extensions are rejected rather than receiving
+real syntax validation before a write. ForgeLine prefers the TypeScript compiler
+when the project provides it; Node 22 validates ordinary `.ts` syntax without
+an npm dependency. TSX requires the TypeScript compiler and fails closed when it
+is unavailable. Unsupported extensions are rejected rather than receiving
 Python syntax.
 
 **Feature-scoped, language-aware QA.** `forge qa <feature> --ssat <contract>`
 only grades files declared by that contract. Dependency, build, cache, VCS, and
 reparse-point trees are pruned. Python is parsed with Python; JavaScript/ESM is
 syntax-checked by Node and inventories exported and local functions; TypeScript
-uses its matching parser. An unavailable parser is reported as
+uses the compiler API when available and Node 22 type stripping as a portable
+`.ts` fallback. TSX requires the compiler. An unavailable parser is reported as
 `PARSER_UNSUPPORTED`, never disguised as a syntax error. A slice without
 discoverable functions is explicitly inventory-only, not behavioral-proof green.
 
@@ -251,9 +255,10 @@ feature evidence. Dependency, build, cache, virtual-environment, and generated
 receipt trees are pruned before either scan. Disappearing optional paths are
 reported as skipped instead of crashing the gate.
 
-Source parsing is extension-aware: Python uses its AST; JavaScript and
-TypeScript use Node/TypeScript when available. An unavailable parser is reported
-as `parser_unsupported`, never misreported as Python syntax. Complexity above
+Source parsing is extension-aware: Python uses its AST; JavaScript uses Node;
+TypeScript uses its compiler when available and Node 22 for ordinary `.ts`
+syntax. TSX requires the compiler. An unavailable parser is reported as
+`parser_unsupported`, never misreported as Python syntax. Complexity above
 the hard threshold (10) cannot receive a passing grade.
 
 Regex invariants must declare a reviewed bounded scope: SSAT module, symbol,

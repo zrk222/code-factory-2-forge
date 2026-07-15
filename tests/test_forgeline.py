@@ -233,18 +233,40 @@ def test_architect_invalid_ssat_returns_structured_error_without_transition(proj
     assert orchestrator.store.state == State.ARCHITECTED
 
 
-def test_typescript_ssat_generates_typescript_and_compiles_when_tsc_is_available(proj):
+def test_typescript_ssat_generates_typescript_and_validates_with_the_active_parser(proj):
     report = scaffold_from_ssat(_typescript_ssat(["src/memory.ts"]), proj)
     target = proj / "src" / "memory.ts"
     source = target.read_text(encoding="utf-8")
     assert len(report) == 1
     assert "export function render(name: string): string" in source
     assert "def render" not in source
-    tsc = shutil.which("tsc")
-    if tsc is None:
-        pytest.skip("tsc is installed by CI for the TypeScript scaffold regression")
-    completed = subprocess.run([tsc, "--noEmit", "--pretty", "false", str(target)], capture_output=True, text=True)
-    assert completed.returncode == 0, completed.stdout + completed.stderr
+    from forgeline.source_scope import analyze_source
+    parsed = analyze_source(target, proj)
+    assert parsed["status"] == "ok"
+    assert parsed["parser"] in {"typescript-compiler", "node-strip-types"}
+
+
+def test_typescript_fallback_measures_symbols_without_a_project_typescript_package(proj):
+    from forgeline.source_scope import analyze_source
+
+    target = proj / "services" / "canary.ts"
+    target.parent.mkdir()
+    target.write_text(
+        "export const recall = (id: string): string => id;\n"
+        "export function explain(id: string): string { return id; }\n",
+        encoding="utf-8",
+    )
+    parsed = analyze_source(target, proj)
+    assert parsed["status"] == "ok"
+    assert {item["name"] for item in parsed["functions"]} >= {"recall", "explain"}
+    assert parsed["parser"] in {"typescript-compiler", "node-strip-types"}
+
+
+def test_invalid_generated_typescript_is_rejected_before_scaffold_write(proj):
+    from forgeline.source_scope import validate_generated_script
+
+    with pytest.raises(ValueError):
+        validate_generated_script("export function broken(name: string): string {\n", proj / "src" / "broken.ts")
 
 
 def test_mjs_ssat_generates_valid_esm_without_python_syntax(proj):
@@ -578,7 +600,7 @@ def test_cli_requires_feature_scope_and_reports_machine_provenance(proj, capsys)
     main(["version", "--json"])
     provenance = json.loads(capsys.readouterr().out)
     assert provenance["package"] == "code-factory-2-forge"
-    assert provenance["version"] == "0.10.5"
+    assert provenance["version"] == "0.10.6"
     assert {"source_commit", "build_hash", "install_origin", "python"} <= provenance.keys()
 
 def test_learning_kernel_promotes_recurring_lessons(proj):

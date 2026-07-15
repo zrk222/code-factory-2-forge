@@ -17,6 +17,13 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Install TypeScript compiler for scaffold validation
+        run: |
+          npm install --no-save --prefix .forge-tsc typescript@5
+          echo "NODE_PATH=${GITHUB_WORKSPACE}/.forge-tsc/node_modules" >> "$GITHUB_ENV"
       - name: Build distributions
         run: |
           python -m pip install --upgrade pip
