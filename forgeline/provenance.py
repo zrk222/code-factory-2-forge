@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from ._build_provenance import SOURCE_COMMIT
 
 
 def _source_commit(module_dir: Path) -> str | None:
@@ -62,7 +63,7 @@ def provenance() -> dict:
             install_origin = "site-packages"
     except importlib.metadata.PackageNotFoundError:
         pass
-    source_commit = _source_commit(module_dir)
+    source_commit = _source_commit(module_dir) or SOURCE_COMMIT
     build_hash = _build_hash(module_dir)
     return {
         "schema": "forgeline.provenance.v1",
