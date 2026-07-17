@@ -13,6 +13,31 @@ pipeline you drive from Claude Code or Codex.
 
 > Stop writing the code. Build — and supervise — the machine that writes it.
 
+## Code Factory target handoff
+
+Code Factory can emit blocked `worker`, `web`, `mobile`, and `agent-ui`
+starters from one reviewed prompt or PRD. ForgeLine is the hardening loop after
+generation:
+
+```bash
+factory create --prd PRD.md --target web --out app
+forge adopt <feature> --root app
+forge architect <feature> <feature.ssat.yaml> --root app --adopt-existing
+```
+
+`--adopt-existing` validates and receipts working source without replacing it.
+The target remains blocked until its architecture, hollow-test challenge,
+runtime smoke, feature-scoped QA, and human promotion gates pass. Generation
+never grants deploy, publish, signing, connector, credential, or
+external-message authority.
+
+```mermaid
+flowchart LR
+    A["Intent"] --> B["Build and gate"]
+    B --> C["Compile and verify"]
+    C --> D["Signed receipts and human-owned ship"]
+```
+
 ## Workflow at a glance
 
 ```mermaid
