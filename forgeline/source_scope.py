@@ -103,9 +103,10 @@ def declared_paths(root: Path, ssat: dict) -> list[Path]:
 
 _NODE_TYPESCRIPT_AST = r"""
 const fs = require('fs');
-const ts = require('typescript');
-const file = process.argv[1];
-const mode = process.argv[2];
+const ts = require(process.env.FORGELINE_TYPESCRIPT_PATH || 'typescript');
+const argOffset = process.argv[1] && process.argv[1].endsWith('.cjs') ? 2 : 1;
+const file = process.argv[argOffset];
+const mode = process.argv[argOffset + 1];
 const source = fs.readFileSync(file, 'utf8');
 const kind = mode === 'typescript'
   ? (file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
@@ -149,7 +150,7 @@ function complexity(node) {
     if (ts.isBinaryExpression(n) && (n.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken || n.operatorToken.kind === ts.SyntaxKind.BarBarToken)) total += 1;
     ts.forEachChild(n, child => walk(child, true));
   }
-  ts.forEachChild(node, child => walk(child, false));
+  ts.forEachChild(node, child => walk(child, true));
   return total;
 }
 const functions = [];
@@ -165,15 +166,40 @@ console.log(JSON.stringify({errors, functions}));
 """
 
 
+def _typescript_module_path(node: str, root: Path) -> str | None:
+    """Resolve a project's TypeScript compiler from the project, not ForgeLine."""
+    resolver = "try { process.stdout.write(require.resolve('typescript')); } catch (_) { process.exit(1); }"
+    for candidate in (Path(root).resolve(), *Path(root).resolve().parents):
+        try:
+            completed = subprocess.run(
+                [node, "-e", resolver], cwd=candidate, capture_output=True,
+                text=True, timeout=10, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if completed.returncode == 0 and completed.stdout.strip():
+            return completed.stdout.strip()
+    return None
+
+
 def _typescript_compiler_parse(node: str, path: Path, root: Path) -> dict | None:
-    """Use the TypeScript compiler API when the active project provides it."""
+    """Use the nearest project compiler through a Windows-safe script file."""
+    compiler = _typescript_module_path(node, root)
+    if compiler is None:
+        return None
+    handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".cjs", delete=False)
     try:
+        with handle:
+            handle.write(_NODE_TYPESCRIPT_AST)
         completed = subprocess.run(
-            [node, "-e", _NODE_TYPESCRIPT_AST, str(path), "typescript"], cwd=root,
+            [node, handle.name, str(path), "typescript"], cwd=root,
+            env={**os.environ, "FORGELINE_TYPESCRIPT_PATH": compiler},
             capture_output=True, text=True, timeout=10, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
+    finally:
+        Path(handle.name).unlink(missing_ok=True)
     if completed.returncode != 0:
         return None
     try:
