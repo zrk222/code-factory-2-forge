@@ -55,7 +55,7 @@ class QAReport:
         return Attribution("qa_audit", len(units), sum(unit.passed for unit in units), units)
 
 
-def _complexity(node: ast.FunctionDef) -> int:
+def _complexity(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
     value = 1
     for child in ast.walk(node):
         if isinstance(child, (ast.If, ast.For, ast.While, ast.ExceptHandler, ast.With, ast.Assert)):
@@ -116,12 +116,21 @@ def qa_audit(src_dir: Path, *, source_paths: Iterable[Path] | None = None) -> QA
             continue
         text = parsed["text"]
         if parsed["language"] == "python":
-            for node in ast.walk(parsed["tree"]):
-                if isinstance(node, ast.FunctionDef) and not node.name.startswith("_"):
-                    _metric(report, path, node.name, _complexity(node), bool(ast.get_docstring(node)), test_text, root)
+            public_nodes: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+            for node in parsed["tree"].body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("_"):
+                    public_nodes.append(node)
+                elif isinstance(node, ast.ClassDef) and not node.name.startswith("_"):
+                    public_nodes.extend(
+                        member for member in node.body
+                        if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and not member.name.startswith("_")
+                    )
+            for node in public_nodes:
+                _metric(report, path, node.name, _complexity(node), bool(ast.get_docstring(node)), test_text, root)
         else:
             for function in parsed.get("functions", []):
-                _metric(report, path, function["name"], function["complexity"], bool(function["documented"]), test_text, root)
+                if function.get("public", False):
+                    _metric(report, path, function["name"], function["complexity"], bool(function["documented"]), test_text, root)
         for pattern, (severity, deduction, message) in SEC_PATTERNS.items():
             if re.search(pattern, text):
                 report.security_score -= deduction

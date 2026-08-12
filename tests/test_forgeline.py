@@ -494,7 +494,7 @@ def test_qa_feature_slice_ignores_unrelated_python_and_never_python_parses_mjs(p
     assert not any("bad.py" in finding for finding in report.findings)
 
 
-def test_mjs_qa_extracts_esm_and_local_symbols_with_measured_coverage(proj):
+def test_mjs_qa_measures_only_exported_symbols_with_measured_coverage(proj):
     from forgeline.gates.qa_audit import qa_audit
 
     feature = proj / "services" / "memory.mjs"
@@ -510,10 +510,57 @@ def test_mjs_qa_extracts_esm_and_local_symbols_with_measured_coverage(proj):
 
     report = qa_audit(proj, source_paths=[feature])
     names = {metric["function"].split(":")[-1] for metric in report.function_metrics}
-    assert {"recall", "normalize"} <= names
+    assert names == {"recall"}
     assert report.coverage_intent is not None and report.coverage_intent > 0
     assert report.metrics["coverage_assessment"] == "measured"
     assert not any("PARSER_UNSUPPORTED" in finding or "QA_SYNTAX" in finding for finding in report.findings)
+
+
+def test_typescript_qa_excludes_callbacks_and_local_helpers(proj):
+    from forgeline.gates.qa_audit import qa_audit
+
+    feature = proj / "services" / "public-surface.ts"
+    feature.parent.mkdir()
+    feature.write_text(
+        "/** Public function. */\n"
+        "export function decide(values: string[]) { return values.map(value => value.trim()); }\n"
+        "function helper(value: string) { return value; }\n"
+        "/** Public arrow. */\n"
+        "export const run = (value: string): string => helper(value);\n",
+        encoding="utf-8",
+    )
+    tests = proj / "services" / "public-surface.test.ts"
+    tests.write_text("import { decide, run } from './public-surface'; decide([]); run('x');\n", encoding="utf-8")
+
+    report = qa_audit(proj, source_paths=[feature])
+    names = {metric["function"].split(":")[-1] for metric in report.function_metrics}
+    assert names == {"decide", "run"}
+    assert report.coverage_intent == 1.0
+
+
+def test_python_qa_excludes_nested_and_private_symbols(proj):
+    from forgeline.gates.qa_audit import qa_audit
+
+    feature = proj / "services" / "public_surface.py"
+    feature.parent.mkdir()
+    feature.write_text(
+        'def decide(value):\n'
+        '    """Public function."""\n'
+        '    def nested():\n'
+        '        return value\n'
+        '    return nested()\n\n'
+        'def _helper(value):\n'
+        '    return value\n',
+        encoding="utf-8",
+    )
+    tests = proj / "tests" / "test_public_surface.py"
+    tests.parent.mkdir()
+    tests.write_text("from services.public_surface import decide\ndef test_decide(): assert decide('x') == 'x'\n", encoding="utf-8")
+
+    report = qa_audit(proj, source_paths=[feature])
+    names = {metric["function"].split(":")[-1] for metric in report.function_metrics}
+    assert names == {"decide"}
+    assert report.coverage_intent == 1.0
 
 
 def test_mjs_invalid_syntax_is_not_misattributed_as_python_error(proj):

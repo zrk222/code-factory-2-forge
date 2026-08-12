@@ -122,6 +122,25 @@ function nameOf(node) {
   if (node.parent && ts.isVariableDeclaration(node.parent) && node.parent.name) return node.parent.name.getText(tree);
   return '<anonymous@' + tree.getLineAndCharacterOfPosition(node.pos).line + '>';
 }
+function hasModifier(node, kind) {
+  return Boolean(node.modifiers && node.modifiers.some(modifier => modifier.kind === kind));
+}
+function exportedVariable(node) {
+  let current = node.parent;
+  while (current && !ts.isVariableStatement(current) && current !== tree) current = current.parent;
+  return Boolean(current && ts.isVariableStatement(current) && hasModifier(current, ts.SyntaxKind.ExportKeyword));
+}
+function publicSurface(node) {
+  if (ts.isFunctionDeclaration(node)) return hasModifier(node, ts.SyntaxKind.ExportKeyword);
+  if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) return exportedVariable(node);
+  if (ts.isMethodDeclaration(node)) {
+    const owner = node.parent;
+    const ownerExported = Boolean(owner && ts.isClassDeclaration(owner) && hasModifier(owner, ts.SyntaxKind.ExportKeyword));
+    const hidden = hasModifier(node, ts.SyntaxKind.PrivateKeyword) || hasModifier(node, ts.SyntaxKind.ProtectedKeyword);
+    return ownerExported && !hidden;
+  }
+  return false;
+}
 function complexity(node) {
   let total = 1;
   function walk(n, nested) {
@@ -137,7 +156,7 @@ const functions = [];
 function visit(node) {
   if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
     const comments = ts.getLeadingCommentRanges(source, node.getFullStart()) || [];
-    functions.push({name: nameOf(node), complexity: complexity(node), documented: comments.some(c => source.slice(c.pos, c.end).startsWith('/**'))});
+    functions.push({name: nameOf(node), complexity: complexity(node), documented: comments.some(c => source.slice(c.pos, c.end).startsWith('/**')), public: publicSurface(node)});
   }
   ts.forEachChild(node, visit);
 }
@@ -185,7 +204,7 @@ def _functions_from_patterns(source: str, patterns: tuple[re.Pattern[str], ...])
     seen: set[str] = set()
     for pattern in patterns:
         for match in pattern.finditer(source):
-            name = match.group(1)
+            name = match.group("name")
             if name in seen:
                 continue
             seen.add(name)
@@ -209,6 +228,7 @@ def _functions_from_patterns(source: str, patterns: tuple[re.Pattern[str], ...])
                 "name": name,
                 "complexity": complexity,
                 "documented": bool(re.search(r"/\*\*[^*]*(?:\*(?!/)[^*]*)*\*/\s*$", prefix, re.DOTALL)),
+                "public": bool(match.groupdict().get("exported")),
             })
     return functions
 
@@ -221,9 +241,8 @@ def _typescript_functions(source: str) -> list[dict]:
     collapsing to a false zero-symbol result when ``typescript`` is absent.
     """
     patterns = (
-        re.compile(r"(?:^|\n)\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)[^{]*\{", re.MULTILINE),
-        re.compile(r"(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)(?:\s*:\s*[^=;\n]+)?\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)(?:\s*:\s*[^=;\n]+)?\s*=>", re.MULTILINE),
-        re.compile(r"(?:^|\n)\s*(?:public\s+|private\s+|protected\s+)?(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*:\s*[^{};]+\{", re.MULTILINE),
+        re.compile(r"(?:^|\n)\s*(?P<exported>export\s+)?(?:default\s+)?(?:async\s+)?function\s+(?P<name>[A-Za-z_$][\w$]*)\s*\([^)]*\)[^{]*\{", re.MULTILINE),
+        re.compile(r"(?:^|\n)\s*(?P<exported>export\s+)?(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)(?:\s*:\s*[^=;\n]+)?\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)(?:\s*:\s*[^=;\n]+)?\s*=>", re.MULTILINE),
     )
     return _functions_from_patterns(source, patterns)
 
@@ -339,7 +358,7 @@ def _javascript_functions(source: str) -> list[dict]:
     branch counts for feature-scoped QA without requiring an npm dependency.
     """
     patterns = (
-        re.compile(r"(?:^|\n)\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)[^{]*\{", re.MULTILINE),
-        re.compile(r"(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>", re.MULTILINE),
+        re.compile(r"(?:^|\n)\s*(?P<exported>export\s+)?(?:default\s+)?(?:async\s+)?function\s+(?P<name>[A-Za-z_$][\w$]*)\s*\([^)]*\)[^{]*\{", re.MULTILINE),
+        re.compile(r"(?:^|\n)\s*(?P<exported>export\s+)?(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>", re.MULTILINE),
     )
     return _functions_from_patterns(source, patterns)
