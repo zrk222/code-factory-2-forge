@@ -1155,3 +1155,31 @@ def test_optimize_pr_has_bounded_loop_and_approval_boundary(proj, monkeypatch):
     assert plan["approval_required"] is True
     assert "src/auth/login.py" in plan["risky_paths"]
     assert "factory pr-pack notifier" in plan["commands"]
+
+
+def test_javascript_literal_braces_use_real_parser(proj):
+    from forgeline.source_scope import analyze_source
+    target = proj / 'literal.mjs'
+    target.write_text('export function openBrace() { return "{"; }\n')
+    assert analyze_source(target, proj)['status'] == 'ok'
+    target.write_text('export function broken() {\n')
+    assert analyze_source(target, proj)['status'] == 'syntax_error'
+
+
+def test_qa_python_quoted_attacks_are_data_but_calls_and_secrets_are_detected(proj):
+    from forgeline.gates.qa_audit import qa_audit
+    target = proj / 'rules.py'
+    target.write_text('examples = ["eval(value)", "pickle.loads(value)", "shell=True", "verify=False", "api_key = \'fixture-value\'"]\n')
+    assert not any('QA_SEC' in item for item in qa_audit(proj).findings)
+    target.write_text('from pickle import loads as decode\nimport subprocess as process\napi_key = "real-looking-secret"\ndef unsafe(value):\n    process.run(value, shell=True)\n    return decode(value)\n')
+    findings = qa_audit(proj).findings
+    assert any('pickle' in item for item in findings)
+    assert any('shell=True' in item for item in findings)
+    assert any('hard-coded credential' in item for item in findings)
+
+
+def test_qa_python_executable_patterns_survive_whitespace(proj):
+    from forgeline.gates.qa_audit import qa_audit
+    target = proj / 'bad.py'
+    target.write_text('def bad(value):\n    return eval (value)\n')
+    assert any('eval()' in item for item in qa_audit(proj).findings)

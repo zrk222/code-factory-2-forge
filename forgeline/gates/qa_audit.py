@@ -79,6 +79,37 @@ SEC_PATTERNS = {
 }
 
 
+def _python_security_text(tree: ast.AST) -> str:
+    """Scan executable calls and credential assignments, not quoted attack fixtures.
+
+    This remains a bounded pattern inventory, not taint analysis. Imported call
+    aliases are expanded so aliasing cannot avoid the existing call patterns.
+    """
+    aliases = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            aliases.update({item.asname or item.name: item.name for item in node.names})
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            aliases.update({item.asname or item.name: node.module + "." + item.name for item in node.names})
+    calls = []
+    assignments = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            name = ast.unparse(node.func)
+            first, *tail = name.split(".")
+            name = ".".join([aliases.get(first, first), *tail])
+            keywords = ", ".join(f"{item.arg}={item.value.value!r}" for item in node.keywords
+                                 if item.arg and isinstance(item.value, ast.Constant))
+            calls.append(f"{name}({keywords})")
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = node.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                for target in targets:
+                    assignments.append(f"{ast.unparse(target)} = {value.value!r}")
+    return "\n".join(calls + assignments)
+
+
 def _is_test(path: Path) -> bool:
     return path.name.startswith("test_") or path.parent.name in {"tests", "test", "__tests__"} or ".test." in path.name or ".spec." in path.name
 
@@ -131,8 +162,9 @@ def qa_audit(src_dir: Path, *, source_paths: Iterable[Path] | None = None) -> QA
             for function in parsed.get("functions", []):
                 if function.get("public", False):
                     _metric(report, path, function["name"], function["complexity"], bool(function["documented"]), test_text, root)
+        security_text = _python_security_text(parsed["tree"]) if parsed["language"] == "python" else text
         for pattern, (severity, deduction, message) in SEC_PATTERNS.items():
-            if re.search(pattern, text):
+            if re.search(pattern, security_text):
                 report.security_score -= deduction
                 report.findings.append(f"QA_SEC[{severity}] {message} in {path.relative_to(root).as_posix()}")
 
