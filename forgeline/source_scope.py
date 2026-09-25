@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from functools import lru_cache
 from typing import Iterable
 
 
@@ -208,14 +209,42 @@ def _typescript_compiler_parse(node: str, path: Path, root: Path) -> dict | None
         return None
 
 
+@lru_cache(maxsize=8)
+def _node_parser_responds(node: str) -> bool:
+    """Require a real JavaScript rejection before trusting check-only success."""
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".mjs", delete=False) as handle:
+        handle.write("export function broken( {\n")
+        target = Path(handle.name)
+    try:
+        result = subprocess.run([node, "--check", str(target)], capture_output=True,
+                                text=True, timeout=10, check=False)
+        return result.returncode != 0 and "SyntaxError" in result.stderr
+    finally:
+        target.unlink(missing_ok=True)
+
+
 def _node_syntax_check(node: str, path: Path, root: Path, *, typescript: bool = False) -> subprocess.CompletedProcess[str]:
-    args = [node]
-    if typescript:
-        # Node 22 can parse and erase ordinary TypeScript annotations without
-        # an npm dependency. It is the portable fallback for .ts source.
-        args.append("--experimental-strip-types")
-    args.extend(["--check", str(path)])
-    return subprocess.run(args, cwd=root, capture_output=True, text=True, timeout=10, check=False)
+    if not _node_parser_responds(node):
+        raise OSError("Node parser did not reject its malformed canary; select a working native runtime")
+    if not typescript:
+        return subprocess.run([node, "--check", str(path)], cwd=root, capture_output=True,
+                              text=True, timeout=10, check=False)
+    # Node --check plus type stripping can accept an unfinished TS function.
+    # Erase types explicitly, then validate the resulting JS with the real parser.
+    with tempfile.TemporaryDirectory(prefix="forge-ts-parse-") as temporary:
+        directory = Path(temporary)
+        script = directory / "strip.cjs"
+        output = directory / "source.mjs"
+        script.write_text("const fs = require('fs'); const {stripTypeScriptTypes} = require('node:module');\n"
+                          "fs.writeFileSync(process.argv[3], stripTypeScriptTypes(fs.readFileSync(process.argv[2], 'utf8')));\n", encoding="utf-8")
+        stripped = subprocess.run([node, str(script), str(path), str(output)], cwd=root,
+                                  capture_output=True, text=True, timeout=10, check=False)
+        if stripped.returncode != 0:
+            return stripped
+        if not output.is_file():
+            raise OSError("TypeScript erasure produced no artifact")
+        return subprocess.run([node, "--check", str(output)], cwd=root, capture_output=True,
+                              text=True, timeout=10, check=False)
 
 
 def _nearest_existing_directory(path: Path) -> Path:
@@ -285,10 +314,9 @@ def validate_generated_script(source: str, target: Path) -> str:
     language = language_for(target)
     if language not in {"javascript", "typescript"}:
         raise ValueError(f"no script validator for {target}")
-    # Node's --check intentionally accepts an incomplete function body in
-    # check-only mode. Generated stubs have no brace-bearing literals, so this
-    # small structural guard closes that gap before invoking the real parser.
-    if re.search(r"^\s*def\s+", source, flags=re.MULTILINE) or source.count("{") != source.count("}"):
+    # Reject accidental Python scaffolds; JavaScript syntax belongs to a real
+    # parser, whose malformed canary must fail before its result is trusted.
+    if re.search(r"^\s*def\s+", source, flags=re.MULTILINE):
         raise ValueError(f"generated invalid {language} structure for {target}")
     node = shutil.which("node")
     if node is None:
@@ -317,6 +345,8 @@ def validate_generated_script(source: str, target: Path) -> str:
         if "bad option" in message or "unknown option" in message:
             raise ValueError(f"Node 22+ or the TypeScript compiler is required to validate generated TypeScript for {target}")
         raise ValueError(message or f"generated invalid TypeScript for {target}")
+    except OSError as exc:
+        raise ValueError(f"script parser unavailable: {exc}") from exc
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -341,8 +371,6 @@ def analyze_source(path: Path, root: Path) -> dict:
             return {"status": "syntax_error", "language": language, "error": str(error), "text": text}
     if language not in {"javascript", "typescript"}:
         return {"status": "parser_unsupported", "language": language, "text": text}
-    if text.count("{") != text.count("}"):
-        return {"status": "syntax_error", "language": language, "text": text, "error": "unbalanced braces"}
     node = shutil.which("node")
     if node is None:
         return {"status": "parser_unsupported", "language": language, "text": text, "reason": "node is unavailable"}
