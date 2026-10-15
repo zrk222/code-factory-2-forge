@@ -19,14 +19,16 @@ def _jev_file(root: Path, path: Path, total: int) -> tuple[dict, bytes, int]:
     return {"path": relative.as_posix(), "sha256": hashlib.sha256(data).hexdigest()}, data, total
 
 def _jev_claims(criteria: list, ids: set) -> list:
-    claims = []
+    claims, criterion_ids = [], set()
     for item in criteria:
         refs = item.get("evidence_ids") if isinstance(item, dict) else None
         if (not isinstance(item, dict) or set(item) != {"id", "statement", "evidence_ids"} or
                 not all(isinstance(item.get(k), str) and item[k].strip() for k in ("id", "statement")) or
                 not isinstance(refs, list) or not refs or not all(isinstance(x, str) for x in refs) or
-                len(refs) != len(set(refs)) or not set(refs).issubset(ids) or len(item["statement"]) > 500):
+                len(refs) != len(set(refs)) or not set(refs).issubset(ids) or len(item["statement"]) > 500 or
+                item["id"] in criterion_ids):
             raise ValueError("FORGE_CONTEXT_INVALID: criterion evidence refs invalid")
+        criterion_ids.add(item["id"])
         claims.append({"id": item["id"], "statement": item["statement"], "supporting_evidence_ids": refs + ["forgeline-context"], "contradicting_evidence_ids": [], "status": "unresolved"})
     return claims
 
@@ -61,7 +63,8 @@ def _jev_evidence_rows(root: Path, evidence: list, manifest: list, total: int) -
     rows, ids = [], set()
     for item in evidence:
         if (not isinstance(item, dict) or set(item) != {"id", "path", "kind"} or
-                not all(isinstance(item.get(k), str) and item[k] for k in ("id", "path", "kind")) or item["id"] in ids):
+                not all(isinstance(item.get(k), str) and item[k] for k in ("id", "path", "kind")) or
+                item["id"] == "forgeline-context" or item["id"] in ids):
             raise ValueError("FORGE_CONTEXT_INVALID: evidence row invalid")
         ids.add(item["id"]); row, data, total = _jev_file(root, root / item["path"], total); manifest.append(row)
         try: content = data.decode("utf-8")
@@ -72,7 +75,6 @@ def _jev_evidence_rows(root: Path, evidence: list, manifest: list, total: int) -
 
 def _jev_packet(deterministic: dict, fields: tuple, manifest: list,
                 rows: list, ids: set) -> dict:
-    from factoryline.analysis_evidence import REVIEW_EVIDENCE_SCHEMA, validate_review_evidence
     _, profile, criteria, _, omissions, rubric = fields
     candidate = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     for row in rows: row["provenance"]["candidate_sha256"] = candidate
@@ -83,11 +85,14 @@ def _jev_packet(deterministic: dict, fields: tuple, manifest: list,
         "omissions": omissions, "source_manifest": manifest, "review_material": review_material,
         "material_sha256": hashlib.sha256(json.dumps(review_material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
     receipt = hashlib.sha256(json.dumps(provenance, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    core = {"schema": REVIEW_EVIDENCE_SCHEMA, "candidate_sha256": candidate, "receipt_sha256": receipt,
+    # ForgeLine's deterministic packet builder has no runtime dependency on
+    # FactoryLine. The optional CF adapter validates this shared wire format
+    # when invoked; standalone ForgeLine callers still get the same schema.
+    core = {"schema": "factory.review-evidence.v1", "candidate_sha256": candidate, "receipt_sha256": receipt,
         "evidence": rows + [{"id": "forgeline-context", "kind": "forgeline_context", "epistemic_status": "observed", "provenance": provenance}],
         "claims": claims, "unknowns": [{"id": f"forge-omission-{i}", "verification_action": x} for i, x in enumerate(omissions)], "authority": "none"}
     packet = core | {"packet_sha256": hashlib.sha256(json.dumps(core, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
-    return validate_review_evidence(packet)
+    return packet
 
 def build_jev_review_packet(root: Path, ssat_path: Path, material: dict, deterministic: dict) -> dict:
     """Build a bounded standard CF packet from explicit local material."""

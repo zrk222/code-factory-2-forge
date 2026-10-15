@@ -837,6 +837,39 @@ def test_jev_review_packet_is_explicit_and_advisory(proj, profile):
     assert receipt["usage"] is None and receipt["cost"] is None and receipt["latency"] is None
 
 
+@pytest.mark.parametrize("availability", ["missing-module", "missing-api"])
+def test_jev_optional_adapter_absence_stays_advisory_without_weakening_review(proj, monkeypatch, availability):
+    import sys
+    from types import ModuleType
+
+    fill_good(proj)
+    (proj / "evidence.txt").write_text("observed evidence", encoding="utf-8")
+    o = Orchestrator(proj, "notifier")
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    o.store.set_state(State.FILLED)
+    unavailable = None if availability == "missing-module" else ModuleType("factoryline.jev_classifier")
+    monkeypatch.setitem(sys.modules, "factoryline.jev_classifier", unavailable)
+    monkeypatch.setitem(sys.modules, "factoryline.analysis_evidence", None)
+
+    result = o.review(proj / "notifier.ssat.yaml", material={
+        "profile": "implementation",
+        "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
+        "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "operator_artifact"}],
+        "omissions": ["adapter unavailable"],
+    })
+
+    assert result["reviewed"] is True
+    assert result["jev_review"]["status"] == "FALLBACK"
+    assert result["jev_review"]["authority"] == "none"
+    assert result["jev_review"]["release_decision"] is False
+    assert result["jev_packet"]["schema"] == "factory.review-evidence.v1"
+    core = {key: value for key, value in result["jev_packet"].items() if key != "packet_sha256"}
+    assert result["jev_packet"]["packet_sha256"] == hashlib.sha256(
+        json.dumps(core, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def test_jev_stale_source_and_invalid_profile_fail_closed(proj):
     fill_good(proj); (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
     material = {"profile": "implementation", "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
@@ -872,11 +905,46 @@ def test_jev_non_object_material_records_deterministic_failure(proj, material):
     assert o.store.latest_receipt("review", strict=True)["attempt"] == 1
 
 
+@pytest.mark.parametrize("invalid_material", [
+    {
+        "profile": "implementation",
+        "criteria": [
+            {"id": "c1", "statement": "first", "evidence_ids": ["e1"]},
+            {"id": "c1", "statement": "duplicate", "evidence_ids": ["e1"]},
+        ],
+        "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}],
+        "omissions": [],
+    },
+    {
+        "profile": "implementation",
+        "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["forgeline-context"]}],
+        "evidence": [{"id": "forgeline-context", "path": "evidence.txt", "kind": "artifact"}],
+        "omissions": [],
+    },
+])
+def test_jev_duplicate_claim_ids_and_reserved_context_evidence_fail_before_reviewer(proj, invalid_material):
+    fill_good(proj)
+    (proj / "evidence.txt").write_text("observed evidence", encoding="utf-8")
+    o = Orchestrator(proj, "notifier")
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    o.store.set_state(State.FILLED)
+    calls = []
+
+    result = o.review(proj / "notifier.ssat.yaml", material=invalid_material,
+                      reviewer=lambda packet: calls.append(packet))
+
+    assert result["reviewed"] is True
+    assert result["jev_review"]["status"] == "FORGE_CONTEXT_INVALID"
+    assert result["jev_packet"] is None
+    assert calls == []
+
+
 @pytest.mark.parametrize("profile", ["requirements", "implementation", "test_evidence", "repair"])
 def test_jev_shared_adapter_roundtrip(proj, profile):
-    import factoryline.jev_classifier as classifier
+    classifier = pytest.importorskip("factoryline.jev_classifier", reason="optional FactoryLine adapter is not installed")
     if not hasattr(classifier, "review_forgeline_packet"):
-        pytest.skip("shared CF adapter is not installed in this environment")
+        pytest.skip("installed FactoryLine has no review_forgeline_packet API")
     fill_good(proj); (proj / "evidence.txt").write_text("observed evidence", encoding="utf-8")
     material = {"profile": profile, "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
                 "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}
@@ -894,9 +962,9 @@ def test_jev_shared_adapter_roundtrip(proj, profile):
 
 @pytest.mark.parametrize("transport,expected", [(None, "FALLBACK"), (lambda request: {}, "JEV_REVIEW_INVALID")])
 def test_jev_missing_or_malformed_shared_response(proj, transport, expected):
-    import factoryline.jev_classifier as classifier
+    classifier = pytest.importorskip("factoryline.jev_classifier", reason="optional FactoryLine adapter is not installed")
     if not hasattr(classifier, "review_forgeline_packet"):
-        pytest.skip("shared CF adapter is not installed in this environment")
+        pytest.skip("installed FactoryLine has no review_forgeline_packet API")
     fill_good(proj); (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
     material = {"profile": "repair", "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
                 "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}
@@ -907,9 +975,9 @@ def test_jev_missing_or_malformed_shared_response(proj, transport, expected):
 
 
 def test_jev_supported_assessment_cannot_promote_deterministic_failure(proj):
-    import factoryline.jev_classifier as classifier
+    classifier = pytest.importorskip("factoryline.jev_classifier", reason="optional FactoryLine adapter is not installed")
     if not hasattr(classifier, "review_forgeline_packet"):
-        pytest.skip("shared CF adapter is not installed in this environment")
+        pytest.skip("installed FactoryLine has no review_forgeline_packet API")
     fill_good(proj); (proj / "slices/notifier/formatter.py").write_text("raise NotImplementedError\n", encoding="utf-8")
     (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
     material = {"profile": "implementation", "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
@@ -927,20 +995,30 @@ def test_jev_supported_assessment_cannot_promote_deterministic_failure(proj):
 
 @pytest.mark.parametrize("adapter_available", [False, True])
 def test_jev_cli_accepts_only_local_explicit_response(proj, capsys, monkeypatch, adapter_available):
+    import builtins
     import json
-    import factoryline.jev_classifier as classifier
     from forgeline.cli import main
+    if adapter_available:
+        classifier = pytest.importorskip("factoryline.jev_classifier", reason="optional FactoryLine adapter is not installed")
+        if not hasattr(classifier, "review_forgeline_packet"):
+            pytest.skip("installed FactoryLine has no review_forgeline_packet API")
+        monkeypatch.setattr(classifier, "review_forgeline_packet",
+            lambda packet, transport: responses.append(transport({})) or {"status": "JEV_REVIEW_INVALID"}, raising=False)
+    else:
+        original_import = builtins.__import__
+
+        def without_factoryline_adapter(name, *args, **kwargs):
+            if name == "factoryline.jev_classifier":
+                raise ModuleNotFoundError("No module named 'factoryline'")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", without_factoryline_adapter)
     fill_good(proj); (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
     (proj / "material.json").write_text(json.dumps({"profile": "implementation",
         "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
         "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}), encoding="utf-8")
     (proj / "response.json").write_text("{}", encoding="utf-8")
     responses = []
-    if adapter_available:
-        monkeypatch.setattr(classifier, "review_forgeline_packet",
-            lambda packet, transport: responses.append(transport({})) or {"status": "JEV_REVIEW_INVALID"}, raising=False)
-    else:
-        monkeypatch.delattr(classifier, "review_forgeline_packet", raising=False)
     o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
     main(["review", "notifier", str(proj / "notifier.ssat.yaml"), "--root", str(proj), "--jev-material", "material.json", "--jev-response", "response.json"])
     result = json.loads(capsys.readouterr().out)
