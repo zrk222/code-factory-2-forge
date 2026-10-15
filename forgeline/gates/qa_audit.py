@@ -126,13 +126,15 @@ def qa_audit(src_dir: Path, *, source_paths: Iterable[Path] | None = None) -> QA
     """Grade a reviewed feature slice, or an explicitly requested pruned repository scan."""
     root = Path(src_dir).resolve()
     report = QAReport(scope={"kind": "feature" if source_paths is not None else "repo_wide"})
-    inventory = (
-        iter_source_files(root, paths=source_paths, skipped=report.skipped_paths)
-        if source_paths is not None
-        else iter_source_files(root, suffixes=SOURCE_SUFFIXES, skipped=report.skipped_paths)
-    )
-    code_files = [path for path in inventory if not _is_test(path)]
-    test_files = [path for path in iter_source_files(root, suffixes=SOURCE_SUFFIXES, skipped=report.skipped_paths) if _is_test(path)]
+    if source_paths is None:
+        inventory = iter_source_files(root, suffixes=SOURCE_SUFFIXES, skipped=report.skipped_paths)
+        code_files = [path for path in inventory if not _is_test(path)]
+        test_files = [path for path in inventory if _is_test(path)]
+    else:
+        inventory = iter_source_files(root, paths=source_paths, skipped=report.skipped_paths)
+        code_files = [path for path in inventory if not _is_test(path)]
+        # Feature scans intentionally search repository tests for coverage intent.
+        test_files = [path for path in iter_source_files(root, suffixes=SOURCE_SUFFIXES, skipped=report.skipped_paths) if _is_test(path)]
     report.scope["code_files"] = [path.relative_to(root).as_posix() for path in code_files]
     test_text = "\n".join(text for path in test_files if (text := read_text(path, report.skipped_paths)) is not None)
 
@@ -140,7 +142,12 @@ def qa_audit(src_dir: Path, *, source_paths: Iterable[Path] | None = None) -> QA
         parsed = analyze_source(path, root)
         status = parsed["status"]
         if status == "parser_unsupported":
-            report.findings.append(f"QA_PARSER_UNSUPPORTED {path.relative_to(root).as_posix()}: {parsed.get('reason', parsed['language'])}")
+            if parsed.get("read_error"):
+                read_error = str(parsed["read_error"])
+                report.skipped_paths.append(read_error)
+                report.findings.append(f"QA_SOURCE_READ_ERROR {path.relative_to(root).as_posix()}: {read_error}")
+            else:
+                report.findings.append(f"QA_PARSER_UNSUPPORTED {path.relative_to(root).as_posix()}: {parsed.get('reason', parsed['language'])}")
             continue
         if status == "syntax_error":
             report.findings.append(f"QA_SYNTAX {path.relative_to(root).as_posix()}: {parsed['error']}")
@@ -192,6 +199,9 @@ def qa_audit(src_dir: Path, *, source_paths: Iterable[Path] | None = None) -> QA
         report.grade = "C"
     if any(finding.startswith(("QA_SYNTAX", "QA_PARSER_UNSUPPORTED")) for finding in report.findings):
         report.grade = "F"
+    if report.skipped_paths:
+        report.findings.append(f"QA_SOURCE_INVENTORY_INCOMPLETE skipped={len(report.skipped_paths)}")
+        report.grade = "F"
     report.metrics = {
         "coverage_intent": report.coverage_intent, "max_complexity": report.max_complexity,
         "security_score": report.security_score, "doc_ratio": report.doc_ratio,
@@ -199,5 +209,6 @@ def qa_audit(src_dir: Path, *, source_paths: Iterable[Path] | None = None) -> QA
         "coverage_assessment": "static_name_match" if count else "not_applicable_no_declared_functions",
         "behavioral_proof_status": "not_measured_static_only" if count else "unavailable_no_declared_functions",
         "scope": report.scope, "skipped_paths": report.skipped_paths,
+        "inventory_complete": not report.skipped_paths,
     }
     return report

@@ -14,7 +14,8 @@ from typing import Iterable
 
 
 IGNORED_DIRECTORIES = frozenset({
-    ".git", ".pnpm", "node_modules", ".next", ".nuxt", ".forge", ".venv",
+    ".git", ".pnpm", "node_modules", ".next", ".nuxt", ".forge", ".factory",
+    "ignored.factory", ".venv",
     "venv", "dist", "build", "coverage", ".cache", "cache", "out", "output",
     "target", "vendor", "__pycache__",
 })
@@ -362,7 +363,8 @@ def analyze_source(path: Path, root: Path) -> dict:
             "status": "parser_unsupported",
             "language": language,
             "text": "",
-            "reason": "source disappeared during scan",
+            "reason": "source read failed",
+            "read_error": skipped[0] if skipped else f"{path}: unreadable",
         }
     if language == "python":
         try:
