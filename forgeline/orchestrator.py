@@ -10,6 +10,7 @@ from .states import State, can_transition, IllegalTransition, HUMAN_GATES
 from .run_store import RunStore
 from .ssat import ScaffoldError, load_ssat, scaffold_from_ssat, check_erosion
 from .gates import judge_consistency, grumpy_review, skill_check
+from .gates.judge import build_jev_review_packet, jev_snapshot, valid_jev_advisory
 from .gates.qa_audit import qa_audit
 from .source_scope import declared_paths
 from .skill_memory import record_lesson, inject_lessons_block, lessons_for
@@ -231,7 +232,7 @@ class Orchestrator:
                     "code": "E_ILLEGAL_TRANSITION",
                     "current_state": current.value,
                     "requested_state": State.SCAFFOLDED.value,
-                    "next": _NEXT_ACTION[current],
+                    "next": _NEXT_ACTION[current].replace("<feature>", self.feature),
                 },
             }
         try:
@@ -280,7 +281,81 @@ class Orchestrator:
         )
         return result
 
-    def review(self, ssat_path: Path) -> dict:
+    def _run_jev_review(self, ssat_path: Path, material: dict, reviewer, deterministic: dict):
+        packet = None
+        profile = material.get("profile") if isinstance(material, dict) else None
+        try:
+            packet = build_jev_review_packet(self.root, ssat_path, material, deterministic)
+            before = jev_snapshot(self.root, packet)
+            if reviewer is None:
+                from factoryline.jev_classifier import review_forgeline_packet
+                reviewer = review_forgeline_packet
+            result = reviewer(packet)
+            if not valid_jev_advisory(result, packet):
+                result = {"status": "JEV_REVIEW_INVALID", "authority": "none", "release_decision": False,
+                          "deterministic_result": deterministic}
+            elif result["status"] == "FALLBACK" and result.get("fallback_reason") != "JEV_UNAVAILABLE":
+                result = {**result, "status": "JEV_REVIEW_INVALID"}
+            if before != jev_snapshot(self.root, packet):
+                result = {"status": "JEV_REVIEW_STALE", "authority": "none", "release_decision": False,
+                          "deterministic_result": deterministic}
+        except Exception as error:
+            status = ("FORGE_CONTEXT_INVALID" if packet is None or str(error).startswith("FORGE_CONTEXT_INVALID") else
+                      "JEV_REVIEW_STALE" if str(error).startswith("JEV_REVIEW_STALE") else "FALLBACK")
+            result = {"status": status, "reason": type(error).__name__, "authority": "none",
+                      "release_decision": False, "deterministic_result": deterministic}
+        self.store.receipt(phase="jev_review", profile=profile,
+            packet_sha256=packet.get("packet_sha256") if packet else None,
+            request_sha256=result.get("request_sha256", packet.get("packet_sha256") if packet else None),
+            result_sha256=hashlib.sha256(json.dumps(result, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+            status=result.get("status"), advisory=result, usage=result.get("usage"),
+            cost=result.get("cost_usd", result.get("cost")), latency=result.get("latency"))
+        return packet, result
+
+    def _review_success(self, attempt, qa, attribution):
+        self._advance(State.REVIEWED, f"review pass (attempt {attempt}, QA={qa.grade})")
+        return {"reviewed": True, "attempt": attempt, "qa_grade": qa.grade,
+                "qa_metrics": qa.metrics, "attribution": attribution}
+
+    def _review_failure(self, attempt, qa, findings, attribution):
+        for finding in findings:
+            code = finding.split()[0].split("[")[0]
+            record_lesson(self.root, phase="fill", failure_code=code, fix=finding, feature=self.feature)
+        kernel = LearningKernel(self.root)
+        promoted = kernel.promote(lessons_for(self.root, "fill")); kernel.audit_effectiveness()
+        if self.store.state != State.BLOCKED:
+            self._advance(State.BLOCKED, f"review failed (attempt {attempt}, QA={qa.grade})")
+        escalation = ("normal" if attempt == 1 else
+                      "elevated: fix ALL findings, not just blockers" if attempt == 2 else
+                      "final: exhausted - human review required")
+        result = {"reviewed": False, "attempt": attempt, "qa_grade": qa.grade,
+                  "qa_metrics": qa.metrics, "findings": findings,
+                  "newly_promoted_constraints": promoted, "escalation": escalation,
+                  "lessons_for_next": inject_lessons_block(self.root, "fill"),
+                  "attribution": attribution}
+        if attempt >= MAX_REFINE: result["exhausted"] = True
+        return result
+
+    def _finish_review(self, passed, attempt, qa, findings, attribution, material, packet, advisory):
+        result = (self._review_success(attempt, qa, attribution) if passed else
+                  self._review_failure(attempt, qa, findings, attribution))
+        if material is not None: result.update({"jev_packet": packet, "jev_review": advisory})
+        return result
+
+    def _review_attribution(self, judge_ok, judge_findings, grumpy_ok, grumpy_findings, erosion, qa):
+        return _gate_attribution("review", [
+            ("judge", judge_ok, "consistent" if judge_ok else " | ".join(judge_findings),
+             FailureClass.INCONSISTENT_LOGIC),
+            ("adversary", grumpy_ok, "all probes resisted" if grumpy_ok else " | ".join(grumpy_findings),
+             FailureClass.SECURITY_FINDING),
+            ("architecture", not erosion, "no erosion" if not erosion else
+             " | ".join(f"{v.code} {v.message}" for v in erosion),
+             FailureClass.INVARIANT_VIOLATION if any(v.code.startswith("E_INVARIANT") for v in erosion) else FailureClass.SIGNATURE_DRIFT),
+            ("qa_audit", qa.passed, f"grade={qa.grade}; metrics={qa.metrics}",
+             qa.attribution.dominant_failure_class() or FailureClass.COMPLEXITY_EXCEEDED),
+        ])
+
+    def review(self, ssat_path: Path, *, material: dict | None = None, reviewer=None) -> dict:
         """Judge + grumpy adversary + arch erosion + deep QA audit, with a
         recursive learning kernel and escalating refine loop."""
         ssat = load_ssat(ssat_path)
@@ -293,17 +368,13 @@ class Orchestrator:
         qa = qa_audit(self.root, source_paths=feature_paths)
         all_findings = j + g + [f"{v.code} {v.message}" for v in erosion] + qa.findings
         all_ok = j_ok and g_ok and not erosion and qa.passed
-        review_attr = _gate_attribution("review", [
-            ("judge", j_ok, "consistent" if j_ok else " | ".join(j),
-             FailureClass.INCONSISTENT_LOGIC),
-            ("adversary", g_ok, "all probes resisted" if g_ok else " | ".join(g),
-             FailureClass.SECURITY_FINDING),
-            ("architecture", not erosion, "no erosion" if not erosion else
-             " | ".join(f"{v.code} {v.message}" for v in erosion),
-             FailureClass.INVARIANT_VIOLATION if any(v.code.startswith("E_INVARIANT") for v in erosion) else FailureClass.SIGNATURE_DRIFT),
-            ("qa_audit", qa.passed, f"grade={qa.grade}; metrics={qa.metrics}",
-             qa.attribution.dominant_failure_class() or FailureClass.COMPLEXITY_EXCEEDED),
-        ])
+        review_attr = self._review_attribution(j_ok, j, g_ok, g, erosion, qa)
+
+        jev_packet = jev_result = None
+        if material is not None:
+            deterministic = {"passed": bool(all_ok), "findings": all_findings, "judge_ok": bool(j_ok),
+                             "grumpy_ok": bool(g_ok), "erosion": len(erosion), "qa_grade": qa.grade}
+            jev_packet, jev_result = self._run_jev_review(ssat_path, material, reviewer, deterministic)
 
         # recursive learning: measure whether active constraints caught failures
         codes = [f.split()[0].split("[")[0] for f in all_findings]
@@ -315,32 +386,12 @@ class Orchestrator:
                            active_constraints_fired=list(prevented.keys()),
                            findings=all_findings, attribution=review_attr)
         if all_ok:
-            self._advance(State.REVIEWED, f"review pass (attempt {attempt}, QA={qa.grade})")
-            return {"reviewed": True, "attempt": attempt, "qa_grade": qa.grade,
-                    "qa_metrics": qa.metrics, "attribution": review_attr}
+            return self._finish_review(True, attempt, qa, all_findings, review_attr,
+                                       material, jev_packet, jev_result)
 
         # record lessons, then PROMOTE recurring ones into active policy (recursion)
-        for f in all_findings:
-            code = f.split()[0].split("[")[0]
-            record_lesson(self.root, phase="fill", failure_code=code, fix=f, feature=self.feature)
-        promoted = kernel.promote(lessons_for(self.root, "fill"))
-        kernel.audit_effectiveness()
-
-        if self.store.state != State.BLOCKED:
-            self._advance(State.BLOCKED, f"review failed (attempt {attempt}, QA={qa.grade})")
-
-        # ESCALATION: refine loop gets stricter each attempt
-        escalation = ("normal" if attempt == 1 else
-                      "elevated: fix ALL findings, not just blockers" if attempt == 2 else
-                      "final: exhausted — human review required" )
-        result = {"reviewed": False, "attempt": attempt, "qa_grade": qa.grade,
-                  "qa_metrics": qa.metrics, "findings": all_findings,
-                  "newly_promoted_constraints": promoted, "escalation": escalation,
-                  "lessons_for_next": inject_lessons_block(self.root, "fill"),
-                  "attribution": review_attr}
-        if attempt >= MAX_REFINE:
-            result["exhausted"] = True
-        return result
+        return self._finish_review(False, attempt, qa, all_findings, review_attr,
+                                   material, jev_packet, jev_result)
 
     def arch_gate(self, ssat_path: Path) -> dict:
         ssat = load_ssat(ssat_path)
