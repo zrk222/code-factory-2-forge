@@ -573,17 +573,101 @@ def test_qa_audit_catches_security_and_complexity(proj):
     assert not r.passed
 
 
-def test_qa_prunes_pnpm_dependency_tree_and_keeps_feature_inventory(proj):
+def test_qa_prunes_dependency_and_factory_generated_trees(proj, monkeypatch):
     from forgeline.gates.qa_audit import qa_audit
+    from forgeline import source_scope
 
     fill_good(proj)
     optional = proj / "node_modules" / ".pnpm" / "chokidar" / "node_modules" / "fsevents"
     optional.mkdir(parents=True)
     (optional / "optional.py").write_text("def hidden():\n    return eval('1')\n")
+    generated = proj / ".factory" / "retained-clones" / "snapshot"
+    generated.mkdir(parents=True)
+    (generated / "clone.py").write_text("def hidden():\n    return eval('1')\n")
+    ignored = proj / "ignored.factory" / "build-snapshots" / "snapshot"
+    ignored.mkdir(parents=True)
+    (ignored / "snapshot.py").write_text("def hidden():\n    return eval('1')\n")
+
+    visited = []
+    walk = source_scope.os.walk
+
+    def tracked_walk(*args, **kwargs):
+        for current, dirs, names in walk(*args, **kwargs):
+            visited.append(Path(current).relative_to(proj).as_posix())
+            yield current, dirs, names
+
+    monkeypatch.setattr(source_scope.os, "walk", tracked_walk)
 
     report = qa_audit(proj)
     assert report.security_score == 100
-    assert all("node_modules" not in path for path in report.scope["code_files"])
+    assert report.metrics["inventory_complete"] is True
+    assert all(not path.startswith(("node_modules/", ".factory/", "ignored.factory/")) for path in report.scope["code_files"])
+    assert visited.count(".") == 1
+    assert not any(path == ".factory" or path.startswith(".factory/") for path in visited)
+    assert not any(path == "ignored.factory" or path.startswith("ignored.factory/") for path in visited)
+
+
+def test_qa_fails_closed_when_inventory_walk_is_incomplete(proj, monkeypatch):
+    from forgeline.gates.qa_audit import qa_audit
+    from forgeline import source_scope
+
+    (proj / "safe.py").write_text('def safe():\n    """Safe function."""\n    return True\n', encoding="utf-8")
+
+    def incomplete_walk(root, *, topdown, onerror, followlinks):
+        yield str(root), [], ["safe.py"]
+        onerror(PermissionError("access denied", str(Path(root) / "restricted")))
+
+    monkeypatch.setattr(source_scope.os, "walk", incomplete_walk)
+    report = qa_audit(proj)
+
+    assert report.metrics["inventory_complete"] is False
+    assert any(finding.startswith("QA_SOURCE_INVENTORY_INCOMPLETE") for finding in report.findings)
+    assert report.grade == "F"
+    assert report.passed is False
+
+
+def test_qa_records_source_read_failure_as_incomplete(proj, monkeypatch):
+    from forgeline import source_scope
+    from forgeline.gates.qa_audit import qa_audit
+
+    target = proj / "unreadable.py"
+    target.write_text('def hidden():\n    return True\n', encoding="utf-8")
+    (proj / "unsupported.rb").write_text("def hidden; true; end\n", encoding="utf-8")
+    read_text = source_scope.Path.read_text
+
+    def fail_target(path, *args, **kwargs):
+        if path.resolve() == target.resolve():
+            raise PermissionError("denied for test")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(source_scope.Path, "read_text", fail_target)
+    report = qa_audit(proj)
+    unsupported = source_scope.analyze_source(proj / "unsupported.rb", proj)
+
+    assert report.metrics["inventory_complete"] is False
+    assert any(finding.startswith("QA_SOURCE_READ_ERROR unreadable.py:") for finding in report.findings)
+    assert any(finding.startswith("QA_SOURCE_INVENTORY_INCOMPLETE") for finding in report.findings)
+    assert report.grade == "F"
+    assert report.passed is False
+    assert unsupported["status"] == "parser_unsupported"
+    assert "read_error" not in unsupported
+
+
+def test_qa_explicit_factory_path_still_uses_repo_tests(proj):
+    from forgeline.gates.qa_audit import qa_audit
+
+    feature = proj / ".factory" / "explicit_feature.py"
+    feature.parent.mkdir(parents=True)
+    feature.write_text('def run(value):\n    """Return the supplied value."""\n    return value\n', encoding="utf-8")
+    tests = proj / "tests" / "test_explicit_feature.py"
+    tests.parent.mkdir()
+    tests.write_text("def test_run():\n    assert run('x') == 'x'\n", encoding="utf-8")
+
+    report = qa_audit(proj, source_paths=[feature])
+
+    assert report.scope["code_files"] == [".factory/explicit_feature.py"]
+    assert report.function_metrics[0]["tested"]
+    assert report.metrics["inventory_complete"] is True
 
 
 def test_qa_feature_slice_ignores_unrelated_python_and_never_python_parses_mjs(proj):
