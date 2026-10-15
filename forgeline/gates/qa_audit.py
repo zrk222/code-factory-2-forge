@@ -196,8 +196,8 @@ def qa_audit(src_dir: Path, *, source_paths: Iterable[Path] | None = None) -> QA
         "coverage_intent": report.coverage_intent, "max_complexity": report.max_complexity,
         "security_score": report.security_score, "doc_ratio": report.doc_ratio,
         "composite": round(score, 1), "complexity_policy": "hard",
-        "coverage_assessment": "measured" if count else "not_applicable_no_declared_functions",
-        "behavioral_proof_status": "available" if count else "unavailable_no_declared_functions",
+        "coverage_assessment": "static_name_match" if count else "not_applicable_no_declared_functions",
+        "behavioral_proof_status": "not_measured_static_only" if count else "unavailable_no_declared_functions",
         "scope": report.scope, "skipped_paths": report.skipped_paths,
     }
     return report

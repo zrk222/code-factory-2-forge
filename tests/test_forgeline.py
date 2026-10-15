@@ -43,6 +43,42 @@ def test_run_store_persists_state_and_receipts(proj):
     assert RunStore(proj, "notifier").state == State.EXPANDED
     assert (proj/".forge"/"notifier"/"receipts.jsonl").read_text().strip()
 
+
+@pytest.mark.parametrize("corruption", ["green", "truncated", "reordered", "timestamp"])
+def test_run_store_strict_history_rejects_modified_rows(proj, corruption, monkeypatch):
+    store = RunStore(proj, "notifier")
+    stamps = iter(["2026-10-15T09:00:00+00:00", "2026-10-15T09:00:01+00:00"])
+    monkeypatch.setattr("forgeline.run_store._now", lambda: next(stamps))
+    store.receipt(phase="verify_tests", verified=True)
+    store.receipt(phase="smoke_gate", smoked=False if corruption == "green" else True)
+    lines = store.receipts.read_text(encoding="utf-8").splitlines()
+    if corruption == "green":
+        lines[-1] = lines[-1].replace('"smoked": false', '"smoked": true')
+    elif corruption == "truncated":
+        lines.append('{"phase":"smoke_gate"')
+    elif corruption == "timestamp":
+        lines[-1] = lines[-1].replace('"ts": "', '"ts": "bad-')
+    else:
+        lines.reverse()
+    store.receipts.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    if corruption == "green":
+        assert store.latest_receipt("smoke_gate")["smoked"] is True
+    with pytest.raises(ValueError, match="receipt"):
+        store.latest_receipt("smoke_gate", strict=True)
+
+
+def test_verify_cache_rejects_hashed_failed_receipt(proj):
+    from forgeline.orchestrator import _verify_cache
+
+    store = RunStore(proj, "notifier")
+    fingerprint = {"sha256": "current", "python_only": True}
+    for state in (State.TESTS_VERIFIED, State.SMOKED, State.SHIPPED):
+        store.set_state(state)
+        store.receipt(phase="verify_tests", verified=False, input_fingerprint="current")
+        cached, previous = _verify_cache(store, state, fingerprint)
+        assert previous["verified"] is False and (not cached or not cached["verified"])
+
 def test_scaffold_generates_signatures_from_ssat(proj):
     ssat = load_ssat(proj/"notifier.ssat.yaml")
     created = scaffold_from_ssat(ssat, proj)
@@ -512,7 +548,8 @@ def test_mjs_qa_measures_only_exported_symbols_with_measured_coverage(proj):
     names = {metric["function"].split(":")[-1] for metric in report.function_metrics}
     assert names == {"recall"}
     assert report.coverage_intent is not None and report.coverage_intent > 0
-    assert report.metrics["coverage_assessment"] == "measured"
+    assert report.metrics["coverage_assessment"] == "static_name_match"
+    assert report.metrics["behavioral_proof_status"] == "not_measured_static_only"
     assert not any("PARSER_UNSUPPORTED" in finding or "QA_SYNTAX" in finding for finding in report.findings)
 
 
@@ -770,7 +807,7 @@ def test_ship_blocks_on_intent_gap(proj):
     r = o.ship()
     assert r["shipped"] is False and r["unverified_assumptions"]
 
-def test_ship_succeeds_when_intent_honored(proj):
+def test_ship_succeeds_when_intent_honored(proj, monkeypatch):
     from forgeline.orchestrator import Orchestrator
     from forgeline.states import State
     o = Orchestrator(proj, "notifier")
@@ -780,6 +817,11 @@ def test_ship_succeeds_when_intent_honored(proj):
     write_smoke_manifest(proj); o.verify_tests(proj/"notifier.ssat.yaml"); o.smoke_gate()
     r = o.ship()  # no envelope -> ships (traceability opt-in), or with met obligations
     assert r["shipped"] is True
+    from types import SimpleNamespace
+    monkeypatch.setattr("forgeline.intent_thread.verify_against_intent", lambda *args: SimpleNamespace(
+        envelope_found=True, traceable=False, unverified_assumptions=["gap"],
+        findings=["gap"], intent_hash="sealed", obligations_met=0, obligations_total=1))
+    assert o.ship()["shipped"] is False and o.store.state == State.SHIPPED
 
 
 # ---- runtime smoke gate ----
@@ -811,6 +853,169 @@ def test_smoke_gate_passes_on_green_check(proj):
     o = _to_tests_verified(proj)
     r = o.smoke_gate()
     assert r["smoked"] is True and o.store.state == State.SMOKED
+
+
+@pytest.mark.parametrize("kind, expected_runs", [("python", 1), ("unknown", 4)])
+def test_smoke_reuses_only_python_checks_with_current_evidence(
+    proj, monkeypatch, kind, expected_runs
+):
+    from forgeline.gates.runtime_smoke import SmokeReport, SmokeResult
+
+    o = _to_arch_gated(proj)
+    write_smoke_manifest(proj)
+    manifest = proj / "smoke" / "notifier.json"
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    data["checks"][0]["kind"] = kind
+    manifest.write_text(json.dumps(data), encoding="utf-8")
+    verify_runs = []
+    from forgeline.gates.reverse_classical import verify_tests as verify_impl
+    def tracked_verify(*args):
+        verify_runs.append(1)
+        return verify_impl(*args)
+    monkeypatch.setattr("forgeline.gates.reverse_classical.verify_tests", tracked_verify)
+    assert o.verify_tests(proj / "notifier.ssat.yaml")["verified"]
+    if kind != "python":
+        assert o.verify_tests(proj / "notifier.ssat.yaml")["verified"]
+    assert len(verify_runs) == (1 if kind == "python" else 2)
+
+    calls = []
+
+    def fake_smoke(root, feature):
+        calls.append((root, feature))
+        return SmokeReport(results=[SmokeResult("check", True, "ran green")])
+
+    monkeypatch.setattr("forgeline.gates.runtime_smoke.runtime_smoke", fake_smoke)
+    first = o.smoke_gate()
+    assert first["smoked"], first
+    assert o.smoke_gate()["smoked"]
+    assert len(calls) == (1 if kind == "python" else 2)
+    assert len(verify_runs) == expected_runs
+    if kind != "python":
+        from forgeline.attribution import Attribution, FailureClass, GateResult, UnitResult
+        failed = GateResult(False, Attribution("verify_tests", 1, 0, [UnitResult(
+            "hollow", "verify_tests", False, "command passes against stub", FailureClass.HOLLOW_TEST)]))
+        monkeypatch.setattr("forgeline.gates.reverse_classical.verify_tests", lambda *args: failed)
+        assert not o.smoke_gate()["smoked"]
+        assert o.store.latest_receipt("verify_tests", strict=True)["verified"] is False
+        assert len(calls) == 2
+
+
+@pytest.mark.parametrize("component", ["source", "ssat", "manifest", "environment"])
+def test_smoke_rejects_changed_input_since_verify_receipt(proj, monkeypatch, component):
+    o = _to_tests_verified(proj)
+    source = proj / "slices" / "notifier" / "formatter.py"
+    ssat = proj / "notifier.ssat.yaml"
+    manifest = proj / "smoke" / "notifier.json"
+
+    def change():
+        if component == "source":
+            source.write_text(source.read_text(encoding="utf-8") + "\n# changed\n")
+        elif component == "ssat":
+            ssat.write_text(ssat.read_text(encoding="utf-8") + "\n")
+        elif component == "manifest":
+            manifest.write_text(
+                json.dumps(
+                    {
+                        **json.loads(manifest.read_text(encoding="utf-8")),
+                        "probe": "changed",
+                    }
+                )
+            )
+        else:
+            monkeypatch.setenv("FORGELINE_FRESHNESS_PROBE", "changed")
+
+    change()
+
+    result = o.smoke_gate()
+
+    assert result["smoked"] is False and o.store.state == State.BLOCKED
+    assert "stale" in result["reason"].lower()
+
+
+def test_command_ship_is_fresh_and_repeat_ship_is_legal(proj, monkeypatch):
+    from forgeline.states import State
+    from forgeline.gates.runtime_smoke import SmokeReport, SmokeResult
+
+    o = _to_arch_gated(proj)
+    write_smoke_manifest(proj)
+    manifest = proj / "smoke" / "notifier.json"
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    data["checks"][0]["kind"] = "command"
+    manifest.write_text(json.dumps(data), encoding="utf-8")
+    assert o.verify_tests(proj / "notifier.ssat.yaml")["verified"]
+    runs = []
+
+    def changing_target(root, feature):
+        runs.append((root, feature))
+        passed = len(runs) != 2
+        return SmokeReport(results=[SmokeResult("external", passed, "changed target")])
+
+    monkeypatch.setattr("forgeline.gates.runtime_smoke.runtime_smoke", changing_target)
+    assert o.smoke_gate()["smoked"]
+    result = o.ship(verify_intent=False)
+
+    assert result["shipped"] is False and len(runs) == 2 and o.store.state == State.BLOCKED
+    assert o.verify_tests(proj / "notifier.ssat.yaml")["verified"]
+    assert o.ship(verify_intent=False)["shipped"] is True
+    assert o.ship(verify_intent=False)["shipped"] is True
+    assert len(runs) == 4
+
+
+def test_ship_rechecks_fingerprint_after_intent_verification(proj, monkeypatch):
+    from types import SimpleNamespace
+
+    o = _to_tests_verified(proj)
+    assert o.smoke_gate()["smoked"]
+
+    def drift_during_intent(root, feature, source_root):
+        manifest = root / "smoke" / "notifier.json"
+        manifest.write_text(manifest.read_text(encoding="utf-8") + "\n")
+        return SimpleNamespace(
+            unverified_assumptions=[], findings=[], traceable=True,
+            envelope_found=False, intent_hash="intent", obligations_met=0,
+            obligations_total=0,
+        )
+
+    monkeypatch.setattr("forgeline.intent_thread.verify_against_intent", drift_during_intent)
+    result = o.ship()
+
+    assert result["shipped"] is False and o.store.state == State.SMOKED
+    assert o.store.latest_receipt("ship")["shipped"] is False
+
+
+def test_verify_tests_rejects_inputs_changed_during_execution(proj, monkeypatch):
+    from forgeline.gates.reverse_classical import verify_tests as run_verify
+
+    o = _to_arch_gated(proj)
+    write_smoke_manifest(proj)
+
+    def mutate_after_verify(root, feature, ssat_path):
+        result = run_verify(root, feature, ssat_path)
+        source = root / "slices" / "notifier" / "formatter.py"
+        source.write_text(source.read_text(encoding="utf-8") + "\n# drift\n")
+        return result
+
+    monkeypatch.setattr("forgeline.gates.reverse_classical.verify_tests", mutate_after_verify)
+    result = o.verify_tests(proj / "notifier.ssat.yaml")
+
+    assert result["verified"] is False and o.store.latest_receipt("verify_tests", strict=True)["verified"] is False
+    assert o.store.latest_receipt("verify_tests")["reason"] == "verification inputs changed during execution"
+
+
+@pytest.mark.parametrize("invalid", ["outside", "directory", "receipt"])
+def test_ssat_path_errors_fail_closed(proj, invalid):
+    o = _to_tests_verified(proj) if invalid == "receipt" else _to_arch_gated(proj)
+    if invalid == "receipt":
+        o.store.receipt(phase="verify_tests", verified=True,
+                        input_fingerprint="stale", input_components={"ssat_path": "../outside.ssat.yaml"})
+        result = o.smoke_gate()
+    else:
+        path = proj.parent / "outside.ssat.yaml" if invalid == "outside" else proj / "ssat-directory"
+        path.write_text("modules: []\n", encoding="utf-8") if invalid == "outside" else path.mkdir()
+        result = o.verify_tests(path)
+    assert result.get("verified", result.get("smoked")) is False
+    assert "invalid" in result["reason"].lower() or "ssat" in result["reason"].lower()
+
 
 def test_smoke_gate_blocks_on_missing_manifest(proj):
     from forgeline.states import State

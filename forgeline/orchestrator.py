@@ -3,7 +3,7 @@ governance and HSF for decision compilation when a spec carries a decision
 table. Everything is a receipt; every gate failure records a skill lesson and
 routes to the refine loop."""
 from __future__ import annotations
-import hashlib, json, shutil, subprocess, sys
+import hashlib, json, shutil, subprocess, sys, os
 from pathlib import Path
 import yaml
 from .states import State, can_transition, IllegalTransition, HUMAN_GATES
@@ -66,24 +66,116 @@ def _judge_failure_class(findings: list[str]) -> FailureClass:
 def _verify_tests_fingerprint(root: Path, feature: str, ssat_path: Path) -> dict:
     """Hash every verified input so stale reverse-classical receipts cannot pass."""
     from .source_scope import iter_source_files
+    from .gates.runtime_smoke import _load_manifest
     root = Path(root).resolve()
     ssat_path = Path(ssat_path).resolve()
+    ssat_relative = ssat_path.relative_to(root).as_posix()
+    if not ssat_path.is_file():
+        raise ValueError("SSAT path is not a regular file")
     ssat = load_ssat(ssat_path)
-    components: dict[str, str] = {"ssat": hashlib.sha256(Path(ssat_path).read_bytes()).hexdigest()}
+    components: dict[str, str] = {"ssat": hashlib.sha256(Path(ssat_path).read_bytes()).hexdigest(),
+                                  "ssat_path": ssat_relative}
     for path in declared_paths(root, ssat):
         key = f"source:{path.relative_to(root).as_posix()}"
         components[key] = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "MISSING"
     smoke_paths = [root / "smoke" / f"{feature}.json", root / "smoke" / "smoke.json"]
     for path in smoke_paths:
-        if path.exists():
-            components[f"smoke:{path.relative_to(root).as_posix()}"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        components[f"smoke:{path.relative_to(root).as_posix()}"] = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "MISSING"
     for path in iter_source_files(root):
         if path.name.startswith("test_") or path.parent.name in {"tests", "test", "__tests__"} or ".test." in path.name or ".spec." in path.name:
             components[f"test:{path.relative_to(root).as_posix()}"] = hashlib.sha256(path.read_bytes()).hexdigest()
     components["command"] = "forge verify-tests"
     components["tool_version"] = __version__
+    try:
+        checks = _load_manifest(root, feature)
+    except (OSError, ValueError, TypeError, KeyError):
+        checks = None
+    shell = os.environ.get("COMSPEC", "cmd.exe") if os.name == "nt" else "/bin/sh"
+    executable = Path(sys.executable).resolve()
+    shell_path = Path(shutil.which(shell) or shell).resolve()
+    from .gates import reverse_classical, runtime_smoke
+    context_parts = [
+        *(hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+          for module in (reverse_classical, runtime_smoke)),
+        [hashlib.sha256(executable.read_bytes()).hexdigest(), str(executable), sys.version],
+        [hashlib.sha256(shell_path.read_bytes()).hexdigest(), str(shell_path)],
+        [sys.platform, str(root)],
+        hashlib.sha256(json.dumps(sorted(os.environ.items())).encode()).hexdigest(),
+    ]
+    context = hashlib.sha256(json.dumps(context_parts).encode()).hexdigest()
+    components["execution_context"] = context
     canonical = json.dumps(components, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return {"sha256": hashlib.sha256(canonical).hexdigest(), "components": components}
+    return {"sha256": hashlib.sha256(canonical).hexdigest(), "components": components,
+            "python_only": bool(checks) and all(check.kind == "python" for check in checks)}
+
+
+def _verified_inputs(store: RunStore, root: Path, feature: str) -> tuple[dict, dict]:
+    receipt = store.latest_receipt("verify_tests", strict=True)
+    if not receipt or receipt.get("verified") is not True:
+        raise ValueError("missing verified test receipt")
+    relative = receipt.get("input_components", {}).get("ssat_path")
+    if not isinstance(relative, str) or Path(relative).is_absolute():
+        raise ValueError("invalid SSAT receipt path")
+    current = _verify_tests_fingerprint(root, feature, root / relative)
+    if current["sha256"] != receipt.get("input_fingerprint"):
+        raise ValueError("verify-tests evidence is stale")
+    return receipt, current
+
+
+def _smoke_receipt_matches(store: RunStore, verified: dict, inputs: dict) -> bool:
+    smoke = store.latest_receipt("smoke_gate", strict=True)
+    return bool(smoke and smoke.get("smoked") is True
+                and smoke.get("input_fingerprint") == inputs["sha256"]
+                and smoke.get("ts", "") >= verified.get("ts", ""))
+
+
+def _same_snapshot(before: dict, after: dict) -> bool:
+    return before.get("sha256") == after.get("sha256")
+
+
+def _smoke_response(report, lines: list[str], attribution: dict) -> dict:
+    gate = report.gate_result
+    if gate.passed:
+        return {"smoked": True, "checks": len(report.results), "attribution": attribution}
+    reason = (report.failures[0].reason if report.failures and report.failures[0].name == "evidence"
+              else "no runtime behavior verified" if not report.manifest_found
+              else "runtime behavioral check(s) failed")
+    return {"smoked": False, "reason": reason,
+            "failures": [f"{failure.name}: {failure.reason}" for failure in report.failures],
+            "attribution": attribution}
+
+
+def _verify_cache(store: RunStore, state: State, fingerprint: dict) -> tuple[dict | None, dict | None]:
+    if state not in {State.SHIPPED, State.TESTS_VERIFIED, State.SMOKED}:
+        return None, None
+    previous = store.latest_receipt("verify_tests", strict=True)
+    current = (fingerprint["python_only"] and previous
+               and previous.get("verified") is True
+               and previous.get("input_fingerprint") == fingerprint["sha256"])
+    if current:
+        note = "already shipped" if state == State.SHIPPED else "already verified"
+        return {"verified": True, "note": note, "input_fingerprint": fingerprint["sha256"]}, previous
+    if state == State.SHIPPED:
+        return {"verified": False,
+                "reason": "shipped artifact has stale verify-tests evidence; open a new feature run",
+                "input_fingerprint": fingerprint["sha256"],
+                "previous_fingerprint": previous.get("input_fingerprint") if previous else None}, previous
+    return None, previous
+
+
+def _smoke_execution(store: RunStore, root: Path, feature: str, inputs: dict):
+    from .gates.runtime_smoke import runtime_smoke, SmokeReport
+    try:
+        report = runtime_smoke(root, feature)
+        _, after = _verified_inputs(store, root.resolve(), feature)
+        if not _same_snapshot(inputs, after):
+            report = SmokeReport()
+            report.add("evidence", False, "smoke inputs changed during execution")
+    except Exception as error:
+        report = SmokeReport()
+        report.add("evidence", False, f"smoke evidence invalid: {error}")
+    return report
+
 
 class Orchestrator:
     def __init__(self, root: Path, feature: str):
@@ -294,59 +386,107 @@ class Orchestrator:
                            note="decision table present — route to HSF compile")
         return {"decision_rules": len(rows), "next": "hsf compile"}
 
-    def smoke_gate(self) -> dict:
+    def smoke_gate(self, *, force: bool = False) -> dict:
         """Runtime behavior verification — the behavior-by-inspection gate.
         Runs the built artifact against declared behavioral checks (smoke/<feature>.json)
         in isolated subprocesses. Blocks ship on any runtime failure. This is the
         right-sized version of a per-PR preview deployment: verify the thing RUNS
         and behaves, not just that it type-checks and honors the spec."""
-        from .gates.runtime_smoke import runtime_smoke, smoke_report_lines
-        if self.store.state == State.SHIPPED:
-            return {"smoked": True, "note": "already shipped"}
-        if self.store.state == State.SMOKED:
-            return {"smoked": True, "note": "already smoked"}
-        if self.store.state != State.TESTS_VERIFIED:
+        from .gates.runtime_smoke import smoke_report_lines
+        state = self.store.state
+        if state not in {State.TESTS_VERIFIED, State.SMOKED, State.SHIPPED}:
             return {"smoked": False,
                     "reason": "tests not verified - run `forge verify-tests` first"}
-        rep = runtime_smoke(self.root, self.feature)
-        gate = rep.gate_result
-        attr = gate.attribution.to_dict()
+        try:
+            verified, inputs = _verified_inputs(
+                self.store, self.root.resolve(), self.feature
+            )
+            if state in {State.SMOKED, State.SHIPPED} and inputs["python_only"] and not force:
+                if _smoke_receipt_matches(self.store, verified, inputs):
+                    return {"smoked": True, "note": "current smoke evidence reused"}
+        except Exception as error:
+            from .gates.runtime_smoke import SmokeReport
+            rep = SmokeReport()
+            rep.add("evidence", False, f"smoke evidence invalid: {error}")
+            verified, inputs = {}, {"sha256": "INVALID"}
+        else:
+            rep = self._smoke_after_fresh_verify(inputs)
         lines = smoke_report_lines(rep)
-        if not gate.passed:
-            self.store.receipt(phase="smoke_gate", smoked=False,
-                               manifest_found=rep.manifest_found,
-                               failures=[r.name for r in rep.failures],
-                               report=lines, attribution=attr)
-            # a runtime failure is a real defect -> block; refine loop owns recovery
-            self._advance(State.BLOCKED, "runtime smoke gate failed")
-            return {"smoked": False,
-                    "reason": ("no runtime behavior verified" if not rep.manifest_found
-                               else "runtime behavioral check(s) failed"),
-                    "failures": [f"{r.name}: {r.reason}" for r in rep.failures],
-                    "attribution": attr}
-        self._advance(State.SMOKED, "runtime behavior verified")
-        self.store.receipt(phase="smoke_gate", smoked=True,
-                           checks=len(rep.results), report=lines, attribution=attr)
-        return {"smoked": True, "checks": len(rep.results), "attribution": attr}
+        return self._record_smoke_result(rep, inputs, lines)
+
+    def _record_smoke_result(self, rep, inputs: dict, lines: list[str]) -> dict:
+        attr = rep.gate_result.attribution.to_dict()
+        result = _smoke_response(rep, lines, attr)
+        passed = result["smoked"]
+        if passed and self.store.state not in {State.SMOKED, State.SHIPPED}:
+            self._advance(State.SMOKED, "runtime behavior verified")
+        elif not passed:
+            if self.store.state not in {State.BLOCKED, State.SHIPPED}:
+                self._advance(State.BLOCKED, "runtime smoke gate failed")
+        self.store.receipt(phase="smoke_gate", smoked=passed,
+                           input_fingerprint=inputs["sha256"],
+                           manifest_found=rep.manifest_found,
+                           failures=[failure.name for failure in rep.failures],
+                           checks=len(rep.results), report=lines, attribution=attr,
+                           reason=result.get("reason"))
+        return result
+
+    def _record_verify_result(self, gate, fingerprint: dict, drifted: bool,
+                              preserve_state: bool = False) -> dict:
+        attr = (Attribution("verify_tests", 1, 0, [UnitResult(
+            "verify_tests:input_drift", "verify_tests", False,
+            "verification inputs changed during reverse-classical execution",
+            FailureClass.RUNTIME_CRASH,
+        )]).to_dict() if drifted else gate.attribution.to_dict())
+        if not gate.passed or drifted:
+            reason = "verification inputs changed during execution" if drifted else None
+            self.store.receipt(phase="verify_tests", verified=False, attribution=attr,
+                               input_fingerprint=fingerprint["sha256"],
+                               input_components=fingerprint["components"], reason=reason)
+            if self.store.state not in {State.BLOCKED, State.SHIPPED}:
+                self._advance(State.BLOCKED, "reverse-classical test verification failed")
+            return {"verified": False, "reason": "hollow smoke check(s) found", "attribution": attr}
+        if not preserve_state:
+            self._advance(State.TESTS_VERIFIED, "smoke checks proven non-hollow", attribution=attr)
+        self.store.receipt(phase="verify_tests", verified=True, attribution=attr,
+                           input_fingerprint=fingerprint["sha256"],
+                           input_components=fingerprint["components"])
+        return {"verified": True, "checks": gate.attribution.n_checked, "attribution": attr,
+                "input_fingerprint": fingerprint["sha256"]}
+
+    def _run_verify_tests(self, ssat_path: Path, fingerprint: dict,
+                          preserve_state: bool = False) -> dict:
+        from .gates.reverse_classical import verify_tests
+        gate = verify_tests(self.root, self.feature, ssat_path)
+        try:
+            after = _verify_tests_fingerprint(self.root, self.feature, ssat_path)
+            drifted = not _same_snapshot(after, fingerprint)
+        except (OSError, ValueError, TypeError):
+            drifted = True
+        return self._record_verify_result(gate, fingerprint, drifted, preserve_state)
+
+    def _smoke_after_fresh_verify(self, inputs: dict):
+        if inputs["python_only"]:
+            return _smoke_execution(self.store, self.root, self.feature, inputs)
+        ssat = self.root / inputs["components"]["ssat_path"]
+        result = self._run_verify_tests(ssat, inputs, preserve_state=True)
+        if result["verified"]:
+            return _smoke_execution(self.store, self.root, self.feature, inputs)
+        from .gates.runtime_smoke import SmokeReport
+        report = SmokeReport()
+        report.add("evidence", False, "fresh reverse-classical verification failed")
+        return report
 
     def verify_tests(self, ssat_path: Path) -> dict:
         """Verify smoke checks can fail before trusting smoke results."""
-        from .gates.reverse_classical import verify_tests
-        fingerprint = _verify_tests_fingerprint(self.root, self.feature, Path(ssat_path))
-        if self.store.state == State.SHIPPED:
-            previous = self.store.latest_receipt("verify_tests")
-            if previous and previous.get("input_fingerprint") == fingerprint["sha256"]:
-                return {"verified": True, "note": "already shipped", "input_fingerprint": fingerprint["sha256"]}
-            return {
-                "verified": False,
-                "reason": "shipped artifact has stale verify-tests evidence; open a new feature run",
-                "input_fingerprint": fingerprint["sha256"],
-                "previous_fingerprint": previous.get("input_fingerprint") if previous else None,
-            }
+        try:
+            fingerprint = _verify_tests_fingerprint(self.root, self.feature, Path(ssat_path))
+        except (OSError, ValueError, TypeError) as error:
+            return {"verified": False, "reason": f"invalid verification inputs: {error}"}
+        cached, previous = _verify_cache(self.store, self.store.state, fingerprint)
+        if cached:
+            return cached
         if self.store.state in {State.TESTS_VERIFIED, State.SMOKED}:
-            previous = self.store.latest_receipt("verify_tests")
-            if previous and previous.get("input_fingerprint") == fingerprint["sha256"]:
-                return {"verified": True, "note": "already verified", "input_fingerprint": fingerprint["sha256"]}
             # Source, tests, SSAT, command, or tool version changed. Invalidate
             # downstream proof before rerunning rather than returning stale green.
             self.store.set_state(State.ARCH_GATED, "verify-tests inputs changed; stale receipt invalidated")
@@ -356,22 +496,7 @@ class Orchestrator:
         if self.store.state not in {State.ARCH_GATED, State.BLOCKED}:
             return {"verified": False,
                     "reason": "architecture gate not passed - run `forge arch-gate` first"}
-        gate = verify_tests(self.root, self.feature, Path(ssat_path))
-        attr = gate.attribution.to_dict()
-        if not gate.passed:
-            self.store.receipt(phase="verify_tests", verified=False, attribution=attr,
-                               input_fingerprint=fingerprint["sha256"], input_components=fingerprint["components"])
-            if self.store.state != State.BLOCKED:
-                self._advance(State.BLOCKED, "reverse-classical test verification failed")
-            return {"verified": False,
-                    "reason": "hollow smoke check(s) found",
-                    "attribution": attr}
-        self._advance(State.TESTS_VERIFIED, "smoke checks proven non-hollow",
-                      attribution=attr)
-        self.store.receipt(phase="verify_tests", verified=True, attribution=attr,
-                           input_fingerprint=fingerprint["sha256"], input_components=fingerprint["components"])
-        return {"verified": True, "checks": gate.attribution.n_checked, "attribution": attr,
-                "input_fingerprint": fingerprint["sha256"]}
+        return self._run_verify_tests(Path(ssat_path), fingerprint)
 
     def refine(self, evaluate, propose, apply, revert, max_iters: int = 6) -> dict:
         """Run deterministic localized refinement.
@@ -382,42 +507,60 @@ class Orchestrator:
         from .refinement import refine
         return refine(evaluate, propose, apply, revert, self.root, max_iters=max_iters)
 
-    def ship(self, verify_intent: bool = True) -> dict:
-        # ship now requires runtime behavior to have been verified
-        if self.store.state in {State.ARCH_GATED, State.TESTS_VERIFIED}:
-            return {"shipped": False, "reason": "runtime smoke gate not run - "
-                    "call smoke_gate() before ship (behavior must be verified)."}
-        trace = None
-        intent_attr = None
-        if verify_intent:
-            from .intent_thread import verify_against_intent
-            trace = verify_against_intent(self.root, self.feature, self.root)
-            intent_checks = [
-                (f"obligation_{index}", met, evidence, FailureClass.INCONSISTENT_LOGIC)
-                for index, (met, evidence) in enumerate(
-                    [(not trace.unverified_assumptions, finding)
-                     for finding in (trace.findings or ["intent obligations satisfied"])],
-                    1,
-                )
-            ]
-            intent_attr = _gate_attribution("intent_thread", intent_checks)
-            if trace.envelope_found and not trace.traceable:
-                # PRD->production gap: shipped code doesn't honor sealed intent
-                self.store.receipt(phase="ship", shipped=False,
-                                   intent_hash=trace.intent_hash,
-                                   unverified_assumptions=trace.unverified_assumptions,
-                                   findings=trace.findings, attribution=intent_attr)
-                if self.store.state != State.BLOCKED:
-                    self._advance(State.BLOCKED, "intent-traceability gap")
-                return {"shipped": False, "reason": "intent not honored by code",
-                        "unverified_assumptions": trace.unverified_assumptions,
-                        "findings": trace.findings}
-        self._advance(State.SHIPPED, "all gates green")
+    def _ship_intent(self, verify_intent: bool):
+        if not verify_intent:
+            return None, None, None
+        from .intent_thread import verify_against_intent
+        trace = verify_against_intent(self.root, self.feature, self.root)
+        findings = trace.findings or ["intent obligations satisfied"]
+        checks = [(f"obligation_{index}", not trace.unverified_assumptions, finding,
+                   FailureClass.INCONSISTENT_LOGIC)
+                  for index, finding in enumerate(findings, 1)]
+        attribution = _gate_attribution("intent_thread", checks)
+        if trace.envelope_found and not trace.traceable:
+            self.store.receipt(phase="ship", shipped=False, intent_hash=trace.intent_hash,
+                               unverified_assumptions=trace.unverified_assumptions,
+                               findings=trace.findings, attribution=attribution)
+            if self.store.state not in {State.BLOCKED, State.SHIPPED}:
+                self._advance(State.BLOCKED, "intent-traceability gap")
+            return {"shipped": False, "reason": "intent not honored by code",
+                    "unverified_assumptions": trace.unverified_assumptions,
+                    "findings": trace.findings}, trace, attribution
+        return None, trace, attribution
+
+    def _ship_evidence_current(self) -> bool:
+        try:
+            verified, inputs = _verified_inputs(self.store, self.root.resolve(), self.feature)
+            current = _smoke_receipt_matches(self.store, verified, inputs)
+        except Exception:
+            current = False
+        if not current:
+            self.store.receipt(phase="ship", shipped=False,
+                               reason="smoke evidence changed before promotion")
+        return current
+
+    def _record_ship_success(self, trace, attribution: dict) -> dict:
+        if self.store.state != State.SHIPPED:
+            self._advance(State.SHIPPED, "all gates green")
+        obligations = (f"{trace.obligations_met}/{trace.obligations_total}" if trace else None)
         self.store.receipt(phase="ship", shipped=True,
                            intent_hash=(trace.intent_hash if trace else None),
-                           obligations=f"{trace.obligations_met}/{trace.obligations_total}" if trace else None,
-                           attribution=intent_attr)
+                           obligations=obligations, attribution=attribution)
         return {"shipped": True,
                 "intent_traceable": (trace.traceable if trace else None),
-                "obligations_met": (f"{trace.obligations_met}/{trace.obligations_total}" if trace else None),
-                "attribution": intent_attr}
+                "obligations_met": obligations, "attribution": attribution}
+
+    def ship(self, verify_intent: bool = True) -> dict:
+        if self.store.state in {State.ARCH_GATED, State.TESTS_VERIFIED, State.SMOKED, State.SHIPPED}:
+            smoke = self.smoke_gate(force=True)
+            if not smoke.get("smoked"):
+                return {"shipped": False, "reason": "fresh runtime smoke evidence required"}
+        if self.store.state not in {State.SMOKED, State.SHIPPED}:
+            return {"shipped": False, "reason": "runtime smoke gate not run - "
+                    "call smoke_gate() before ship (behavior must be verified)."}
+        rejected, trace, intent_attr = self._ship_intent(verify_intent)
+        if rejected:
+            return rejected
+        if not self._ship_evidence_current():
+            return {"shipped": False, "reason": "smoke evidence changed before promotion"}
+        return self._record_ship_success(trace, intent_attr)

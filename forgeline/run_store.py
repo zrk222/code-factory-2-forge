@@ -8,6 +8,17 @@ from .states import State
 def _now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
+def _strict_receipt(item, previous_ts):
+    if not isinstance(item, dict):
+        raise ValueError("invalid receipt fields")
+    digest = item.pop("h", "")
+    expected = hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest()[:12]
+    stamp = datetime.datetime.fromisoformat(item["ts"])
+    if digest != expected or (previous_ts and stamp < previous_ts):
+        raise ValueError("invalid receipt chain")
+    item["h"] = digest
+    return item, stamp
+
 class RunStore:
     def __init__(self, root: Path, feature: str):
         self.root = Path(root); self.feature = feature
@@ -42,15 +53,21 @@ class RunStore:
         with self.receipts.open("a") as f:
             f.write(json.dumps(fields, sort_keys=True) + "\n")
 
-    def latest_receipt(self, phase: str) -> dict | None:
+    def latest_receipt(self, phase: str, *, strict: bool = False) -> dict | None:
         """Return the most recent receipt for one phase without trusting state."""
         if not self.receipts.exists():
             return None
         latest = None
+        previous_ts = None
         for line in self.receipts.read_text(encoding="utf-8").splitlines():
             try:
                 item = json.loads(line)
-            except json.JSONDecodeError:
+                if strict:
+                    item, stamp = _strict_receipt(item, previous_ts)
+                    previous_ts = stamp
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                if strict:
+                    raise ValueError("corrupt receipt history")
                 continue
             if item.get("phase") == phase:
                 latest = item
