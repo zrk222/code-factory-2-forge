@@ -425,6 +425,68 @@ def test_judge_catches_unfilled_stubs(proj):
     ok, findings = judge_consistency(ssat, proj)
     assert not ok and any("J_STUB" in f for f in findings)
 
+def test_judge_consistency_keeps_standalone_erosion_check(proj, monkeypatch):
+    from forgeline.gates import judge_consistency
+    import forgeline.gates.judge as judge_module
+
+    ssat = load_ssat(proj/"notifier.ssat.yaml")
+    fill_good(proj)
+    calls = []
+    original = judge_module.check_erosion
+
+    def counted(spec, root):
+        calls.append(None)
+        return original(spec, root)
+
+    monkeypatch.setattr(judge_module, "check_erosion", counted)
+    result = judge_consistency(ssat, proj)
+
+    assert result == (True, [])
+    assert len(calls) == 1
+
+@pytest.mark.parametrize("drift", [False, True])
+def test_review_reuses_one_invocation_local_erosion_result(proj, monkeypatch, drift):
+    import forgeline.gates.judge as judge_module
+    import forgeline.orchestrator as orchestrator_module
+
+    fill_good(proj)
+    if drift:
+        (proj/"slices/notifier/formatter.py").write_text(
+            'def format_message(event: dict, extra: int) -> str:\n    return "changed"\n'
+        )
+
+    erosion_calls = []
+    judge_inputs = []
+    original_erosion = orchestrator_module.check_erosion
+    original_judge = orchestrator_module.judge_consistency
+
+    def counted_erosion(spec, root):
+        result = original_erosion(spec, root)
+        erosion_calls.append(result)
+        return result
+
+    def recorded_judge(spec, root, *, erosion=None):
+        judge_inputs.append(erosion)
+        return original_judge(spec, root, erosion=erosion)
+
+    monkeypatch.setattr(orchestrator_module, "check_erosion", counted_erosion)
+    monkeypatch.setattr(judge_module, "check_erosion", counted_erosion)
+    monkeypatch.setattr(orchestrator_module, "judge_consistency", recorded_judge)
+    runner = Orchestrator(proj, "notifier")
+    runner.store.set_state(State.FILLED)
+
+    result = runner.review(proj/"notifier.ssat.yaml")
+
+    assert len(erosion_calls) == 1
+    assert len(judge_inputs) == 1 and judge_inputs[0] is erosion_calls[0]
+    assert result["qa_grade"] == "A"
+    if drift:
+        assert result["reviewed"] is False
+        codes = {finding.split()[0] for finding in result["findings"]}
+        assert {"E_SIG_DRIFT", "J_ARCH"} <= codes
+    else:
+        assert result["reviewed"] is True
+
 def test_full_happy_path_intent_to_ship(proj):
     o = Orchestrator(proj, "notifier")
     o.store.set_state(State.EXPANDED); o.store.set_state(State.ARCHITECTED)

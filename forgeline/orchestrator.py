@@ -286,10 +286,10 @@ class Orchestrator:
         ssat = load_ssat(ssat_path)
         attempt = self.store.bump_attempt("review")
         kernel = LearningKernel(self.root)
-        j_ok, j = judge_consistency(ssat, self.root)
+        erosion = check_erosion(ssat, self.root)
+        j_ok, j = judge_consistency(ssat, self.root, erosion=erosion)
         feature_paths = declared_paths(self.root, ssat)
         g_ok, g = grumpy_review(self.root, source_paths=feature_paths)
-        erosion = check_erosion(ssat, self.root)
         qa = qa_audit(self.root, source_paths=feature_paths)
         all_findings = j + g + [f"{v.code} {v.message}" for v in erosion] + qa.findings
         all_ok = j_ok and g_ok and not erosion and qa.passed

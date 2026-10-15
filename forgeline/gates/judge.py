@@ -6,7 +6,9 @@ from pathlib import Path
 from ..ssat import check_erosion
 from ..source_scope import analyze_source
 
-def judge_consistency(ssat: dict, src_dir: Path) -> tuple[bool, list[str]]:
+def judge_consistency(
+    ssat: dict, src_dir: Path, *, erosion: list | None = None
+) -> tuple[bool, list[str]]:
     findings = []
     src_dir = Path(src_dir)
     for mod in ssat.get("modules", []):
@@ -22,6 +24,7 @@ def judge_consistency(ssat: dict, src_dir: Path) -> tuple[bool, list[str]]:
         elif parsed["status"] == "parser_unsupported":
             findings.append(f"J_PARSER_UNSUPPORTED {mod['path']}: {parsed.get('reason', parsed['language'])}")
     # structural erosion is a judge concern too
-    for v in check_erosion(ssat, src_dir):
+    erosion = check_erosion(ssat, src_dir) if erosion is None else erosion
+    for v in erosion:
         findings.append(f"J_ARCH {v.code} {v.message}")
     return (len(findings) == 0, findings)
