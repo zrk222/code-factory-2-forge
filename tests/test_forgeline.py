@@ -379,9 +379,20 @@ def test_architect_illegal_transition_returns_structured_error_without_traceback
         "code": "E_ILLEGAL_TRANSITION",
         "current_state": "expanded",
         "requested_state": "scaffolded",
-        "next": "forge gate architected <feature> --root .",
+        "next": "forge gate architected notifier --root .",
     }
     assert not (proj / "slices" / "notifier" / "formatter.py").exists()
+
+
+def test_status_and_missing_qa_contract_use_feature(proj, capsys):
+    from forgeline.cli import main
+    main(["status", "notifier", "--root", str(proj)])
+    assert json.loads(capsys.readouterr().out)["next"] == "forge expand notifier (draft use cases; signoff)"
+    with pytest.raises(SystemExit) as exited:
+        main(["qa", "notifier", "--root", str(proj)])
+    assert exited.value.code == 2
+    missing = json.loads(capsys.readouterr().out)
+    assert missing["error"]["next"] == "forge qa notifier --ssat <notifier.ssat.yaml> --root ."
 
 def test_arch_erosion_detects_signature_drift(proj):
     ssat = load_ssat(proj/"notifier.ssat.yaml")
@@ -808,6 +819,213 @@ def test_review_receipt_carries_qa_grade(proj):
     review_r = [r for r in receipts if r.get("phase")=="review"]
     assert review_r and "qa_grade" in review_r[0] and "qa_metrics" in review_r[0]
     assert review_r[0]["attribution"]["n_checked"] == 4
+
+
+@pytest.mark.parametrize("profile", ["requirements", "implementation", "test_evidence", "repair"])
+def test_jev_review_packet_is_explicit_and_advisory(proj, profile):
+    fill_good(proj); (proj / "evidence.txt").write_text("operator evidence", encoding="utf-8")
+    material = {"profile": profile, "criteria": [{"id": "c1", "statement": "criterion met", "evidence_ids": ["e1"]}],
+                "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "operator_artifact"}], "omissions": []}
+    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    seen = []
+    result = o.review(proj / "notifier.ssat.yaml", material=material,
+                      reviewer=lambda packet: seen.append(packet) or {"status": "ADVISORY", "authority": "none", "release_decision": False})
+    context = next(row for row in seen[0]["evidence"] if row["kind"] == "forgeline_context")
+    assert context["provenance"]["profile"] == profile and seen[0]["claims"][0]["id"] == "c1"
+    assert result["reviewed"] is True and result["jev_review"]["authority"] == "none"
+    receipt = o.store.latest_receipt("jev_review", strict=True)
+    assert receipt["usage"] is None and receipt["cost"] is None and receipt["latency"] is None
+
+
+@pytest.mark.parametrize("availability", ["missing-module", "missing-api"])
+def test_jev_optional_adapter_absence_stays_advisory_without_weakening_review(proj, monkeypatch, availability):
+    import sys
+    from types import ModuleType
+
+    fill_good(proj)
+    (proj / "evidence.txt").write_text("observed evidence", encoding="utf-8")
+    o = Orchestrator(proj, "notifier")
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    o.store.set_state(State.FILLED)
+    unavailable = None if availability == "missing-module" else ModuleType("factoryline.jev_classifier")
+    monkeypatch.setitem(sys.modules, "factoryline.jev_classifier", unavailable)
+    monkeypatch.setitem(sys.modules, "factoryline.analysis_evidence", None)
+
+    result = o.review(proj / "notifier.ssat.yaml", material={
+        "profile": "implementation",
+        "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
+        "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "operator_artifact"}],
+        "omissions": ["adapter unavailable"],
+    })
+
+    assert result["reviewed"] is True
+    assert result["jev_review"]["status"] == "FALLBACK"
+    assert result["jev_review"]["authority"] == "none"
+    assert result["jev_review"]["release_decision"] is False
+    assert result["jev_packet"]["schema"] == "factory.review-evidence.v1"
+    core = {key: value for key, value in result["jev_packet"].items() if key != "packet_sha256"}
+    assert result["jev_packet"]["packet_sha256"] == hashlib.sha256(
+        json.dumps(core, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def test_jev_stale_source_and_invalid_profile_fail_closed(proj):
+    fill_good(proj); (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
+    material = {"profile": "implementation", "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
+                "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}
+    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    src = proj / "slices/notifier/formatter.py"
+    def mutate(packet):
+        src.write_text("changed", encoding="utf-8")
+        return {"status": "ADVISORY", "authority": "none", "release_decision": False}
+    result = o.review(proj / "notifier.ssat.yaml", material=material, reviewer=mutate)
+    assert result["reviewed"] is True and result["jev_review"]["status"] == "JEV_REVIEW_STALE"
+    calls = []
+    result = o.review(proj / "notifier.ssat.yaml", material={"profile": "bad"}, reviewer=lambda packet: calls.append(packet))
+    assert result["jev_review"]["status"] == "FORGE_CONTEXT_INVALID" and not calls
+
+
+@pytest.mark.parametrize("material", [[], "bad", 1, False])
+def test_jev_non_object_material_records_deterministic_failure(proj, material):
+    fill_good(proj)
+    o = Orchestrator(proj, "notifier")
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    o.store.set_state(State.FILLED)
+    calls = []
+
+    result = o.review(proj / "notifier.ssat.yaml", material=material,
+                      reviewer=lambda packet: calls.append(packet))
+
+    assert result["reviewed"] is True
+    assert result["jev_review"]["status"] == "FORGE_CONTEXT_INVALID"
+    assert calls == []
+    assert o.store.latest_receipt("jev_review", strict=True)["profile"] is None
+    assert o.store.latest_receipt("review", strict=True)["attempt"] == 1
+
+
+@pytest.mark.parametrize("invalid_material", [
+    {
+        "profile": "implementation",
+        "criteria": [
+            {"id": "c1", "statement": "first", "evidence_ids": ["e1"]},
+            {"id": "c1", "statement": "duplicate", "evidence_ids": ["e1"]},
+        ],
+        "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}],
+        "omissions": [],
+    },
+    {
+        "profile": "implementation",
+        "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["forgeline-context"]}],
+        "evidence": [{"id": "forgeline-context", "path": "evidence.txt", "kind": "artifact"}],
+        "omissions": [],
+    },
+])
+def test_jev_duplicate_claim_ids_and_reserved_context_evidence_fail_before_reviewer(proj, invalid_material):
+    fill_good(proj)
+    (proj / "evidence.txt").write_text("observed evidence", encoding="utf-8")
+    o = Orchestrator(proj, "notifier")
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    o.store.set_state(State.FILLED)
+    calls = []
+
+    result = o.review(proj / "notifier.ssat.yaml", material=invalid_material,
+                      reviewer=lambda packet: calls.append(packet))
+
+    assert result["reviewed"] is True
+    assert result["jev_review"]["status"] == "FORGE_CONTEXT_INVALID"
+    assert result["jev_packet"] is None
+    assert calls == []
+
+
+@pytest.mark.parametrize("profile", ["requirements", "implementation", "test_evidence", "repair"])
+def test_jev_shared_adapter_roundtrip(proj, profile):
+    classifier = pytest.importorskip("factoryline.jev_classifier", reason="optional FactoryLine adapter is not installed")
+    if not hasattr(classifier, "review_forgeline_packet"):
+        pytest.skip("installed FactoryLine has no review_forgeline_packet API")
+    fill_good(proj); (proj / "evidence.txt").write_text("observed evidence", encoding="utf-8")
+    material = {"profile": profile, "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
+                "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}
+    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    def reviewer(packet):
+        def transport(request):
+            return {"context_sha256": request["context_sha256"], "claims": [{"claim_id": "c1", "label": "INSUFFICIENT_EVIDENCE",
+                "supporting_evidence_ids": [], "contradicting_evidence_ids": [], "rationale": "Evidence is insufficient.",
+                "verification_action": "Collect additional evidence."}]}
+        return classifier.review_forgeline_packet(packet, transport=transport)
+    result = o.review(proj / "notifier.ssat.yaml", material=material, reviewer=reviewer)
+    assert result["reviewed"] is True and result["jev_review"]["status"] == "ADVISORY"
+    assert result["jev_review"]["authority"] == "none" and result["jev_review"]["release_decision"] is False
+
+
+@pytest.mark.parametrize("transport,expected", [(None, "FALLBACK"), (lambda request: {}, "JEV_REVIEW_INVALID")])
+def test_jev_missing_or_malformed_shared_response(proj, transport, expected):
+    classifier = pytest.importorskip("factoryline.jev_classifier", reason="optional FactoryLine adapter is not installed")
+    if not hasattr(classifier, "review_forgeline_packet"):
+        pytest.skip("installed FactoryLine has no review_forgeline_packet API")
+    fill_good(proj); (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
+    material = {"profile": "repair", "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
+                "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}
+    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    result = o.review(proj / "notifier.ssat.yaml", material=material,
+                      reviewer=lambda packet: classifier.review_forgeline_packet(packet, transport=transport))
+    assert result["reviewed"] is True and result["jev_review"]["status"] == expected
+
+
+def test_jev_supported_assessment_cannot_promote_deterministic_failure(proj):
+    classifier = pytest.importorskip("factoryline.jev_classifier", reason="optional FactoryLine adapter is not installed")
+    if not hasattr(classifier, "review_forgeline_packet"):
+        pytest.skip("installed FactoryLine has no review_forgeline_packet API")
+    fill_good(proj); (proj / "slices/notifier/formatter.py").write_text("raise NotImplementedError\n", encoding="utf-8")
+    (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
+    material = {"profile": "implementation", "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
+                "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}
+    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    def reviewer(packet):
+        def transport(request):
+            return {"context_sha256": request["context_sha256"], "claims": [{"claim_id": "c1", "label": "SUPPORTED",
+                "supporting_evidence_ids": ["e1"], "contradicting_evidence_ids": [], "rationale": "Assessment only.", "verification_action": None}]}
+        return classifier.review_forgeline_packet(packet, transport=transport)
+    result = o.review(proj / "notifier.ssat.yaml", material=material, reviewer=reviewer)
+    assert result["reviewed"] is False and result["jev_review"]["claims"][0]["label"] == "SUPPORTED"
+    assert o.store.state == State.BLOCKED and result["jev_review"]["release_decision"] is False
+
+
+@pytest.mark.parametrize("adapter_available", [False, True])
+def test_jev_cli_accepts_only_local_explicit_response(proj, capsys, monkeypatch, adapter_available):
+    import builtins
+    import json
+    from forgeline.cli import main
+    if adapter_available:
+        classifier = pytest.importorskip("factoryline.jev_classifier", reason="optional FactoryLine adapter is not installed")
+        if not hasattr(classifier, "review_forgeline_packet"):
+            pytest.skip("installed FactoryLine has no review_forgeline_packet API")
+        monkeypatch.setattr(classifier, "review_forgeline_packet",
+            lambda packet, transport: responses.append(transport({})) or {"status": "JEV_REVIEW_INVALID"}, raising=False)
+    else:
+        original_import = builtins.__import__
+
+        def without_factoryline_adapter(name, *args, **kwargs):
+            if name == "factoryline.jev_classifier":
+                raise ModuleNotFoundError("No module named 'factoryline'")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", without_factoryline_adapter)
+    fill_good(proj); (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
+    (proj / "material.json").write_text(json.dumps({"profile": "implementation",
+        "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
+        "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}), encoding="utf-8")
+    (proj / "response.json").write_text("{}", encoding="utf-8")
+    responses = []
+    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    main(["review", "notifier", str(proj / "notifier.ssat.yaml"), "--root", str(proj), "--jev-material", "material.json", "--jev-response", "response.json"])
+    result = json.loads(capsys.readouterr().out)
+    expected = "JEV_REVIEW_INVALID" if adapter_available else "FALLBACK"
+    assert result["reviewed"] is True and result["jev_review"]["status"] == expected
+    assert result["jev_packet"]["authority"] == "none"
+    assert responses == ([{}] if adapter_available else [])
 
 
 def test_arch_gate_receipt_has_attribution(proj):
