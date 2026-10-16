@@ -296,6 +296,154 @@ def test_typescript_fallback_measures_symbols_without_a_project_typescript_packa
     assert parsed["status"] == "ok"
     assert {item["name"] for item in parsed["functions"]} >= {"recall", "explain"}
     assert parsed["parser"] in {"typescript-compiler", "node-strip-types"}
+    assert parsed["function_metrics_status"] in {"exact", "advisory"}
+    if parsed["parser"] == "node-strip-types":
+        assert parsed["advisory_functions"] == parsed["functions"]
+
+
+def test_typescript_compiler_ast_provides_exact_symbols_and_complexity(proj, monkeypatch):
+    from forgeline import source_scope
+    from forgeline.gates.qa_audit import qa_audit
+
+    node = shutil.which("node")
+    compiler = source_scope._typescript_module_path(node, Path(__file__).resolve().parents[1])
+    assert node and compiler
+    monkeypatch.setattr(source_scope, "_typescript_module_path", lambda _node, _root: compiler)
+    feature = proj / "services" / "inventory.ts"
+    feature.parent.mkdir()
+    feature.write_text(
+        '// branch words if { } in a comment\n'
+        'export const multiline = (value: string) => {\n'
+        '  const marker = "if { while }";\n'
+        '  if (value) return marker;\n'
+        '  return "}";\n'
+        '};\n'
+        'export class First { method(value: string) { if (value) return value; return ""; } }\n'
+        'export class Second { method(value: string) { return value ? value : ""; } }\n'
+        'export const expression = (value: number) => value ? value : 0;\n',
+        encoding="utf-8",
+    )
+    parsed = source_scope.analyze_source(feature, proj)
+    report = qa_audit(proj, source_paths=[feature])
+    names = [item["name"] for item in parsed["functions"] if item["public"]]
+
+    assert parsed["parser"] == "typescript-compiler"
+    assert parsed["function_metrics_status"] == "exact"
+    assert names.count("method") == 2
+    assert {"multiline", "expression"}.issubset(names)
+    expression = next(item for item in parsed["functions"] if item["name"] == "expression")
+    assert expression["complexity"] == 2
+    assert report.metrics["function_inventory_complete"] is True
+    assert report.function_inventory[0]["parser"] == "typescript-compiler"
+    assert not report.advisory_function_metrics
+
+
+def test_typescript_fallback_is_advisory_and_cannot_pass_hard_inventory(proj, monkeypatch):
+    from forgeline import source_scope
+    from forgeline.gates.qa_audit import qa_audit
+
+    monkeypatch.setattr(source_scope, "_typescript_compiler_parse", lambda *_args, **_kwargs: None)
+    feature = proj / "services" / "fallback.ts"
+    feature.parent.mkdir()
+    feature.write_text(
+        'export const fallback = (value: string) => {\n'
+        '  const marker = "if { while }";\n'
+        '  if (value) return marker;\n'
+        '  return "}";\n'
+        '};\n',
+        encoding="utf-8",
+    )
+
+    parsed = source_scope.analyze_source(feature, proj)
+    report = qa_audit(proj, source_paths=[feature])
+
+    assert parsed["status"] == "ok"  # Syntax is valid; inventory remains advisory.
+    assert parsed["function_metrics_status"] == "advisory"
+    assert parsed["advisory_functions"]
+    assert report.function_metrics == []
+    assert report.advisory_function_metrics
+    assert report.metrics["function_inventory_complete"] is False
+    assert any(item.startswith("QA_METRICS_INCOMPLETE") for item in report.findings)
+    assert report.passed is False
+
+
+def test_javascript_scanner_metrics_are_advisory_without_compiler(proj, monkeypatch):
+    from forgeline import source_scope
+    from forgeline.gates.qa_audit import qa_audit
+
+    monkeypatch.setattr(source_scope, "_typescript_compiler_parse", lambda *_args, **_kwargs: None)
+    feature = proj / "services" / "fallback.mjs"
+    feature.parent.mkdir()
+    feature.write_text(
+        '// if words and braces { } are only a comment\n'
+        'export function fallback(value) { const marker = "while { }"; if (value) return marker; return "}"; }\n',
+        encoding="utf-8",
+    )
+
+    parsed = source_scope.analyze_source(feature, proj)
+    report = qa_audit(proj, source_paths=[feature])
+
+    assert parsed["parser"] == "node-check"
+    assert parsed["function_metrics_status"] == "advisory"
+    assert parsed["advisory_functions"]
+    assert report.function_metrics == []
+    assert report.metrics["function_inventory_complete"] is False
+    assert report.passed is False
+
+
+def test_typescript_exact_complexity_above_limit_is_blocked(proj, monkeypatch):
+    from forgeline import source_scope
+    from forgeline.gates.qa_audit import qa_audit
+
+    node = shutil.which("node")
+    compiler = source_scope._typescript_module_path(node, Path(__file__).resolve().parents[1])
+    assert node and compiler
+    monkeypatch.setattr(source_scope, "_typescript_module_path", lambda _node, _root: compiler)
+    feature = proj / "services" / "complex.ts"
+    feature.parent.mkdir()
+    branches = "".join(f"  if (v === {index}) return true;\n" for index in range(11))
+    feature.write_text(f"export function tooComplex(v: number) {{\n{branches}  return false;\n}}\n", encoding="utf-8")
+
+    report = qa_audit(proj, source_paths=[feature])
+
+    assert report.max_complexity > 10
+    assert any(item.startswith("QA_COMPLEXITY") for item in report.findings)
+    assert report.passed is False
+
+
+def test_typescript_export_lists_and_default_identifiers_enter_hard_inventory(proj, monkeypatch):
+    from forgeline import source_scope
+    from forgeline.gates.qa_audit import qa_audit
+
+    node = shutil.which("node")
+    compiler = source_scope._typescript_module_path(node, Path(__file__).resolve().parents[1])
+    assert node and compiler
+    monkeypatch.setattr(source_scope, "_typescript_module_path", lambda _node, _root: compiler)
+    feature = proj / "services" / "indirect-exports.ts"
+    feature.parent.mkdir()
+    branches = "".join(f"  if (v === {index}) return true;\n" for index in range(11))
+    feature.write_text(
+        f"function listed(v: number) {{\n{branches}  return false;\n}}\n"
+        "export { listed as risky };\n"
+        "function defaulted() { return true; }\n"
+        "export default defaulted;\n"
+        "const api = function internal() { return true; };\n"
+        "export { api };\n"
+        f"function privateOuter() {{ function listed(v: number) {{\n{branches}  return false;\n}} return listed(1); }}\n",
+        encoding="utf-8",
+    )
+
+    parsed = source_scope.analyze_source(feature, proj)
+    report = qa_audit(proj, source_paths=[feature])
+
+    assert parsed["function_metrics_status"] == "exact"
+    public_functions = [item for item in parsed["functions"] if item["public"]]
+    assert {item["name"] for item in public_functions} == {"listed", "defaulted", "internal"}
+    assert sum(item["name"] == "listed" for item in public_functions) == 1
+    assert any(item["name"] == "listed" and not item["public"] and item["complexity"] > 10 for item in parsed["functions"])
+    assert report.max_complexity > 10
+    assert any(item.startswith("QA_COMPLEXITY") for item in report.findings)
+    assert report.passed is False
 
 
 def test_invalid_generated_typescript_is_rejected_before_scaffold_write(proj):
@@ -687,8 +835,14 @@ def test_qa_feature_slice_ignores_unrelated_python_and_never_python_parses_mjs(p
     assert not any("bad.py" in finding for finding in report.findings)
 
 
-def test_mjs_qa_measures_only_exported_symbols_with_measured_coverage(proj):
+def test_mjs_qa_measures_only_exported_symbols_with_measured_coverage(proj, monkeypatch):
+    from forgeline import source_scope
     from forgeline.gates.qa_audit import qa_audit
+
+    node = shutil.which("node")
+    compiler = source_scope._typescript_module_path(node, Path(__file__).resolve().parents[1])
+    assert node and compiler
+    monkeypatch.setattr(source_scope, "_typescript_module_path", lambda _node, _root: compiler)
 
     feature = proj / "services" / "memory.mjs"
     feature.parent.mkdir()
@@ -710,8 +864,14 @@ def test_mjs_qa_measures_only_exported_symbols_with_measured_coverage(proj):
     assert not any("PARSER_UNSUPPORTED" in finding or "QA_SYNTAX" in finding for finding in report.findings)
 
 
-def test_typescript_qa_excludes_callbacks_and_local_helpers(proj):
+def test_typescript_qa_excludes_callbacks_and_local_helpers(proj, monkeypatch):
+    from forgeline import source_scope
     from forgeline.gates.qa_audit import qa_audit
+
+    node = shutil.which("node")
+    compiler = source_scope._typescript_module_path(node, Path(__file__).resolve().parents[1])
+    assert node and compiler
+    monkeypatch.setattr(source_scope, "_typescript_module_path", lambda _node, _root: compiler)
 
     feature = proj / "services" / "public-surface.ts"
     feature.parent.mkdir()
@@ -1753,3 +1913,61 @@ def test_qa_python_executable_patterns_survive_whitespace(proj):
     target = proj / 'bad.py'
     target.write_text('def bad(value):\n    return eval (value)\n')
     assert any('eval()' in item for item in qa_audit(proj).findings)
+
+
+def test_python_security_alias_resolution_respects_scope_and_late_shadowing(proj):
+    import ast
+    from forgeline.gates.qa_audit import _python_security_text, qa_audit
+
+    feature = proj / "scopes.py"
+    feature.write_text(
+        "import pickle as codec\n"
+        "decoded = [codec.loads(item) for codec in values]\n"
+        "def imported(value):\n"
+        "    return codec.loads(value)\n"
+        "def argument(codec, value):\n"
+        "    return codec.loads(value)\n"
+        "def late(value):\n"
+        "    result = codec.loads(value)\n"
+        "    codec = object()\n"
+        "    return result\n"
+        "def outer(value):\n"
+        "    def nested():\n"
+        "        import pickle as codec\n"
+        "        return codec.loads(value)\n"
+        "    return nested()\n"
+        "def separate(value):\n"
+        "    import json as codec\n"
+        "    return codec.loads(value)\n"
+        "def shell_shadow(run, command):\n"
+        "    return run(command, shell=True)\n"
+        "lambda_shadow = lambda codec: codec.loads('value')\n"
+        "lambda_import = lambda value=codec.loads('default'): codec.loads(value)\n"
+        "ordinary_lambda = lambda value: value + 1\n"
+        "from pickle import loads\n"
+        "def relative_shadow(value):\n"
+        "    from .safe import loads\n"
+        "    return loads(value)\n"
+        "from .safe import loads as local_loads\n"
+        "local_loads('value')\n"
+        "from .pickle import loads as local_decode\n"
+        "local_decode('value')\n",
+        encoding="utf-8",
+    )
+
+    report = qa_audit(proj, source_paths=[feature])
+    resolved_calls, unknown_calls = _python_security_text(ast.parse(feature.read_text(encoding="utf-8")))
+    security = [item for item in report.findings if item.startswith("QA_SEC")]
+
+    assert resolved_calls.count("pickle.loads(") == 4  # Module, nested import, and lambda default/body.
+    assert resolved_calls.count("json.loads(") == 1
+    assert "shell=True" in resolved_calls  # Unknown targets still retain security-relevant arguments.
+    assert "codec.loads" in unknown_calls  # Argument shadow and late local binding.
+    assert unknown_calls.count("codec.loads") == 1  # Shadowed references are deduplicated by spelling.
+    assert "local_decode" in unknown_calls  # Relative import remains unresolved.
+    assert "loads" in unknown_calls  # A function-local relative import shadows the outer dangerous alias.
+    assert "local_loads" in unknown_calls
+    assert any("pickle" in item for item in security)
+    assert any("shell=True" in item for item in security)
+    assert report.security_score == 55
+    assert any(name.endswith("codec.loads") for name in report.metrics["unknown_security_calls"])

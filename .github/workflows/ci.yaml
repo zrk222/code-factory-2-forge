@@ -9,18 +9,21 @@ concurrency:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    env:
+      NODE_PATH: ${{ github.workspace }}/.forge-tsc/node_modules
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "22"
+      - run: npm ci --prefix .forge-tsc
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]" pytest
       - run: python -m pytest -q
@@ -29,15 +32,15 @@ jobs:
   typescript-scaffold:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "22"
       - run: python -m pip install -e ".[dev]"
-      - run: npm install --no-save --prefix .forge-tsc typescript@5
+      - run: npm ci --prefix .forge-tsc
       - run: echo "${GITHUB_WORKSPACE}/.forge-tsc/node_modules/.bin" >> "$GITHUB_PATH"
       - run: echo "NODE_PATH=${GITHUB_WORKSPACE}/.forge-tsc/node_modules" >> "$GITHUB_ENV"
       - run: python -m pytest -q tests/test_forgeline.py -k typescript

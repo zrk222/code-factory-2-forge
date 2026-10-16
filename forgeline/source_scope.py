@@ -60,12 +60,7 @@ def iter_source_files(
         result = []
         for path in paths:
             candidate = (root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
-            try:
-                candidate.relative_to(root)
-                if candidate.is_file() and candidate.suffix.lower() in wanted:
-                    result.append(candidate)
-            except (FileNotFoundError, NotADirectoryError, OSError, ValueError) as error:
-                skipped.append(f"{candidate}: {type(error).__name__}")
+            _append_source_candidate(candidate, root, wanted, result, skipped)
         return sorted(set(result))
 
     result: list[Path] = []
@@ -80,13 +75,17 @@ def iter_source_files(
             skipped.append(f"{current}: {type(error).__name__}")
             continue
         for name in sorted(names):
-            path = Path(current) / name
-            try:
-                if path.suffix.lower() in wanted and path.is_file():
-                    result.append(path)
-            except (FileNotFoundError, NotADirectoryError, OSError) as error:
-                skipped.append(f"{path}: {type(error).__name__}")
+            _append_source_candidate(Path(current) / name, root, wanted, result, skipped)
     return result
+
+
+def _append_source_candidate(path: Path, root: Path, wanted: set[str], result: list[Path], skipped: list[str]) -> None:
+    try:
+        path.relative_to(root)
+        if path.is_file() and path.suffix.lower() in wanted:
+            result.append(path)
+    except (FileNotFoundError, NotADirectoryError, OSError, ValueError) as error:
+        skipped.append(f"{path}: {type(error).__name__}")
 
 
 def declared_paths(root: Path, ssat: dict) -> list[Path]:
@@ -133,12 +132,28 @@ function exportedVariable(node) {
   while (current && !ts.isVariableStatement(current) && current !== tree) current = current.parent;
   return Boolean(current && ts.isVariableStatement(current) && hasModifier(current, ts.SyntaxKind.ExportKeyword));
 }
+const exportedLocals = new Set();
+for (const statement of tree.statements) {
+  if (ts.isExportDeclaration(statement) && !statement.moduleSpecifier && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+    for (const element of statement.exportClause.elements) exportedLocals.add((element.propertyName || element.name).text);
+  }
+  if (ts.isExportAssignment(statement) && !statement.isExportEquals && ts.isIdentifier(statement.expression)) {
+    exportedLocals.add(statement.expression.text);
+  }
+}
 function publicSurface(node) {
-  if (ts.isFunctionDeclaration(node)) return hasModifier(node, ts.SyntaxKind.ExportKeyword);
-  if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) return exportedVariable(node);
+  if (ts.isFunctionDeclaration(node)) return hasModifier(node, ts.SyntaxKind.ExportKeyword) || (node.parent === tree && exportedLocals.has(nameOf(node)));
+  if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+    const declaration = node.parent;
+    const variableList = declaration && ts.isVariableDeclaration(declaration) ? declaration.parent : null;
+    const statement = variableList && ts.isVariableDeclarationList(variableList) ? variableList.parent : null;
+    const exportedBinding = statement && ts.isVariableStatement(statement) && statement.parent === tree
+      && exportedLocals.has(declaration.name.getText(tree));
+    return exportedVariable(node) || Boolean(exportedBinding);
+  }
   if (ts.isMethodDeclaration(node)) {
     const owner = node.parent;
-    const ownerExported = Boolean(owner && ts.isClassDeclaration(owner) && hasModifier(owner, ts.SyntaxKind.ExportKeyword));
+    const ownerExported = Boolean(owner && ts.isClassDeclaration(owner) && (hasModifier(owner, ts.SyntaxKind.ExportKeyword) || (owner.parent === tree && exportedLocals.has(nameOf(owner)))));
     const hidden = hasModifier(node, ts.SyntaxKind.PrivateKeyword) || hasModifier(node, ts.SyntaxKind.ProtectedKeyword);
     return ownerExported && !hidden;
   }
@@ -184,7 +199,7 @@ def _typescript_module_path(node: str, root: Path) -> str | None:
     return None
 
 
-def _typescript_compiler_parse(node: str, path: Path, root: Path) -> dict | None:
+def _typescript_compiler_parse(node: str, path: Path, root: Path, *, language: str = "typescript") -> dict | None:
     """Use the nearest project compiler through a Windows-safe script file."""
     compiler = _typescript_module_path(node, root)
     if compiler is None:
@@ -194,7 +209,7 @@ def _typescript_compiler_parse(node: str, path: Path, root: Path) -> dict | None
         with handle:
             handle.write(_NODE_TYPESCRIPT_AST)
         completed = subprocess.run(
-            [node, handle.name, str(path), "typescript"], cwd=root,
+            [node, handle.name, str(path), language], cwd=root,
             env={**os.environ, "FORGELINE_TYPESCRIPT_PATH": compiler},
             capture_output=True, text=True, timeout=10, check=False,
         )
@@ -303,20 +318,34 @@ def _typescript_functions(source: str) -> list[dict]:
     return _functions_from_patterns(source, patterns)
 
 
-def validate_generated_script(source: str, target: Path) -> str:
-    """Validate generated JS/TS before the scaffold transaction changes files.
+def _validate_temporary_script(node: str, temporary: Path, target: Path, root: Path, language: str) -> str:
+    if language == "javascript":
+        checked = _node_syntax_check(node, temporary, root)
+        if checked.returncode != 0:
+            raise ValueError(checked.stderr.strip() or f"generated invalid JavaScript for {target}")
+        return "node-check"
+    compiler = _typescript_compiler_parse(node, temporary, root)
+    if compiler is not None:
+        if compiler["errors"]:
+            raise ValueError("; ".join(compiler["errors"]))
+        return "typescript-compiler"
+    if target.suffix.lower() == ".tsx":
+        raise ValueError(f"TypeScript compiler is required to validate generated TSX for {target}")
+    checked = _node_syntax_check(node, temporary, root, typescript=True)
+    if checked.returncode == 0:
+        return "node-strip-types"
+    message = checked.stderr.strip()
+    if "bad option" in message or "unknown option" in message:
+        raise ValueError(f"Node 22+ or the TypeScript compiler is required to validate generated TypeScript for {target}")
+    raise ValueError(message or f"generated invalid TypeScript for {target}")
 
-    TypeScript uses the compiler API when it is resolvable from the target's
-    project. Node 22's type-strip parser is the self-contained fallback for
-    ``.ts`` files. ``.tsx`` intentionally fails closed without the compiler,
-    because Node's type-strip mode does not parse TSX.
-    """
+
+def validate_generated_script(source: str, target: Path) -> str:
+    """Validate generated JS/TS before the scaffold transaction changes files."""
     target = Path(target)
     language = language_for(target)
     if language not in {"javascript", "typescript"}:
         raise ValueError(f"no script validator for {target}")
-    # Reject accidental Python scaffolds; JavaScript syntax belongs to a real
-    # parser, whose malformed canary must fail before its result is trusted.
     if re.search(r"^\s*def\s+", source, flags=re.MULTILINE):
         raise ValueError(f"generated invalid {language} structure for {target}")
     node = shutil.which("node")
@@ -327,48 +356,72 @@ def validate_generated_script(source: str, target: Path) -> str:
         handle.write(source)
         temporary = Path(handle.name)
     try:
-        if language == "javascript":
-            checked = _node_syntax_check(node, temporary, root)
-            if checked.returncode != 0:
-                raise ValueError(checked.stderr.strip() or f"generated invalid JavaScript for {target}")
-            return "node-check"
-        compiler = _typescript_compiler_parse(node, temporary, root)
-        if compiler is not None:
-            if compiler["errors"]:
-                raise ValueError("; ".join(compiler["errors"]))
-            return "typescript-compiler"
-        if target.suffix.lower() == ".tsx":
-            raise ValueError(f"TypeScript compiler is required to validate generated TSX for {target}")
-        checked = _node_syntax_check(node, temporary, root, typescript=True)
-        if checked.returncode == 0:
-            return "node-strip-types"
-        message = checked.stderr.strip()
-        if "bad option" in message or "unknown option" in message:
-            raise ValueError(f"Node 22+ or the TypeScript compiler is required to validate generated TypeScript for {target}")
-        raise ValueError(message or f"generated invalid TypeScript for {target}")
+        return _validate_temporary_script(node, temporary, target, root, language)
     except OSError as exc:
         raise ValueError(f"script parser unavailable: {exc}") from exc
     finally:
         temporary.unlink(missing_ok=True)
 
 
+def _analyze_javascript(path: Path, root: Path, text: str, node: str) -> dict:
+    compiler = _typescript_compiler_parse(node, path, root, language="javascript")
+    if compiler is not None:
+        if compiler["errors"]:
+            return {"status": "syntax_error", "language": "javascript", "text": text,
+                    "error": "; ".join(compiler["errors"])}
+        return {"status": "ok", "language": "javascript", "text": text, "functions": compiler["functions"],
+                "parser": "typescript-compiler", "function_metrics_status": "exact"}
+    try:
+        checked = _node_syntax_check(node, path, root)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {"status": "parser_unsupported", "language": "javascript", "text": text, "reason": type(error).__name__}
+    if checked.returncode != 0:
+        return {"status": "syntax_error", "language": "javascript", "text": text, "error": checked.stderr.strip()}
+    functions = _javascript_functions(text)
+    return {"status": "ok", "language": "javascript", "text": text, "functions": functions,
+            "advisory_functions": functions, "parser": "node-check", "function_metrics_status": "advisory"}
+
+
+def _analyze_typescript(path: Path, root: Path, text: str, node: str) -> dict:
+    compiler = _typescript_compiler_parse(node, path, root)
+    if compiler is not None:
+        if compiler["errors"]:
+            return {"status": "syntax_error", "language": "typescript", "text": text,
+                    "error": "; ".join(compiler["errors"])}
+        return {"status": "ok", "language": "typescript", "text": text, "functions": compiler["functions"],
+                "parser": "typescript-compiler", "function_metrics_status": "exact"}
+    if path.suffix.lower() == ".tsx":
+        return {"status": "parser_unsupported", "language": "typescript", "text": text,
+                "reason": "TypeScript compiler is required for TSX"}
+    try:
+        checked = _node_syntax_check(node, path, root, typescript=True)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {"status": "parser_unsupported", "language": "typescript", "text": text, "reason": type(error).__name__}
+    if checked.returncode == 0:
+        functions = _typescript_functions(text)
+        return {"status": "ok", "language": "typescript", "text": text, "functions": functions,
+                "advisory_functions": functions, "parser": "node-strip-types", "function_metrics_status": "advisory"}
+    message = checked.stderr.strip()
+    if "bad option" in message or "unknown option" in message:
+        return {"status": "parser_unsupported", "language": "typescript", "text": text,
+                "reason": "Node 22+ or the TypeScript compiler is required"}
+    return {"status": "syntax_error", "language": "typescript", "text": text,
+            "error": message or "invalid TypeScript syntax"}
+
+
 def analyze_source(path: Path, root: Path) -> dict:
-    """Parse one file with its matching parser; unsupported never means syntax error."""
+    """Parse one file; syntax success and exact symbol metrics stay distinct."""
     path = Path(path)
     language = language_for(path)
     skipped: list[str] = []
     text = read_text(path, skipped)
     if text is None:
-        return {
-            "status": "parser_unsupported",
-            "language": language,
-            "text": "",
-            "reason": "source read failed",
-            "read_error": skipped[0] if skipped else f"{path}: unreadable",
-        }
+        return {"status": "parser_unsupported", "language": language, "text": "",
+                "reason": "source read failed", "read_error": skipped[0] if skipped else f"{path}: unreadable"}
     if language == "python":
         try:
-            return {"status": "ok", "language": language, "tree": ast.parse(text), "text": text}
+            return {"status": "ok", "language": language, "tree": ast.parse(text), "text": text,
+                    "function_metrics_status": "exact", "parser": "python-ast"}
         except SyntaxError as error:
             return {"status": "syntax_error", "language": language, "error": str(error), "text": text}
     if language not in {"javascript", "typescript"}:
@@ -376,34 +429,8 @@ def analyze_source(path: Path, root: Path) -> dict:
     node = shutil.which("node")
     if node is None:
         return {"status": "parser_unsupported", "language": language, "text": text, "reason": "node is unavailable"}
-    # Node's parser is authoritative for JavaScript/ESM and does not need the
-    # optional TypeScript package. That makes .mjs support deterministic in a
-    # normal Node installation instead of silently producing zero symbols.
-    if language == "javascript":
-        try:
-            checked = _node_syntax_check(node, path, Path(root))
-        except (OSError, subprocess.TimeoutExpired) as error:
-            return {"status": "parser_unsupported", "language": language, "text": text, "reason": type(error).__name__}
-        if checked.returncode != 0:
-            return {"status": "syntax_error", "language": language, "text": text, "error": checked.stderr.strip()}
-        return {"status": "ok", "language": language, "text": text, "functions": _javascript_functions(text), "parser": "node-check"}
-    compiler = _typescript_compiler_parse(node, path, Path(root))
-    if compiler is not None:
-        if compiler["errors"]:
-            return {"status": "syntax_error", "language": language, "text": text, "error": "; ".join(compiler["errors"])}
-        return {"status": "ok", "language": language, "text": text, "functions": compiler["functions"], "parser": "typescript-compiler"}
-    if path.suffix.lower() == ".tsx":
-        return {"status": "parser_unsupported", "language": language, "text": text, "reason": "TypeScript compiler is required for TSX"}
-    try:
-        checked = _node_syntax_check(node, path, Path(root), typescript=True)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        return {"status": "parser_unsupported", "language": language, "text": text, "reason": type(error).__name__}
-    if checked.returncode == 0:
-        return {"status": "ok", "language": language, "text": text, "functions": _typescript_functions(text), "parser": "node-strip-types"}
-    message = checked.stderr.strip()
-    if "bad option" in message or "unknown option" in message:
-        return {"status": "parser_unsupported", "language": language, "text": text, "reason": "Node 22+ or the TypeScript compiler is required"}
-    return {"status": "syntax_error", "language": language, "text": text, "error": message or "invalid TypeScript syntax"}
+    parser = _analyze_javascript if language == "javascript" else _analyze_typescript
+    return parser(path, Path(root), text, node)
 
 
 def _javascript_functions(source: str) -> list[dict]:
