@@ -156,7 +156,29 @@ def verify_against_intent(root: Path, feature: str, src_dir: Path) -> IntentTrac
     coherence = envelope.get("coherence_score", 0)
     if type(coherence) is int and 0 <= coherence <= 100:
         result.coherence_at_seal = coherence
+    if "acceptance_evidence" in envelope:
+        return _admit_acceptance(root, feature, envelope, result)
     result.findings.append(
         "IT_ACCEPTANCE_EVIDENCE_REQUIRED: valid intent checksum; executable acceptance links are not admitted."
     )
+    return result
+
+
+def _admit_acceptance(root, feature, envelope, result):
+    try:
+        from specline.acceptance import validate_acceptance_envelope
+    except ImportError:
+        result.findings.append("IT_VERIFIER_UNAVAILABLE: update SpecLine for acceptance-evidence v1 support.")
+        return result
+    try:
+        verified = validate_acceptance_envelope(root, feature, envelope)
+        if verified["state"] != "PASS" or verified["sealed_hash"] != result.intent_hash:
+            raise ValueError("acceptance identity mismatch")
+    except (SystemExit, ValueError, OSError, KeyError, TypeError, RuntimeError):
+        result.findings.append("IT_INVALID_ACCEPTANCE_EVIDENCE: regenerate current approved evidence.")
+        return result
+    result.evidence_verified = True
+    result.obligations_met = result.obligations_total
+    result.unverified_assumptions = []
+    result.findings = ["IT_RECORDED_ACCEPTANCE_LINKS: current declared links and evidence hashes verified; no semantic or release authority."]
     return result

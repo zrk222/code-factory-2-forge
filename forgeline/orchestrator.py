@@ -574,7 +574,7 @@ class Orchestrator:
                                findings=trace.findings, attribution=attribution)
             if self.store.state not in {State.BLOCKED, State.SHIPPED}:
                 self._advance(State.BLOCKED, "intent-traceability gap")
-            return {"shipped": False, "reason": "intent not honored by code",
+            return {"shipped": False, "reason": "intent evidence is incomplete or invalid",
                     "unverified_assumptions": trace.unverified_assumptions,
                     "findings": trace.findings}, trace, attribution
         return None, trace, attribution
@@ -591,13 +591,25 @@ class Orchestrator:
         return current
 
     def _record_ship_success(self, trace, attribution: dict) -> dict:
+        evidence = None
+        if trace and trace.traceable:
+            from .intent_thread import load_envelope
+            try:
+                from specline.acceptance import validate_acceptance_envelope
+                evidence = load_envelope(self.root, self.feature)
+                verified = validate_acceptance_envelope(self.root, self.feature, evidence)
+                if verified["state"] != "PASS" or verified["sealed_hash"] != trace.intent_hash:
+                    raise ValueError("intent identity changed")
+            except (ImportError, SystemExit, ValueError, OSError, KeyError, TypeError, RuntimeError):
+                self.store.receipt(phase="ship", shipped=False, reason="intent evidence changed before promotion")
+                return {"shipped": False, "reason": "intent evidence changed before promotion"}
         if self.store.state != State.SHIPPED:
             self._advance(State.SHIPPED, "all gates green")
         obligations = (f"{trace.obligations_met}/{trace.obligations_total}" if trace else None)
         self.store.receipt(phase="ship", shipped=True,
                            intent_hash=(trace.intent_hash if trace else None),
                            obligations=obligations, attribution=attribution)
-        return {"shipped": True,
+        return {"shipped": True, "intent_evidence": evidence,
                 "intent_traceable": (trace.traceable if trace else None),
                 "obligations_met": obligations, "attribution": attribution}
 

@@ -222,19 +222,24 @@ forge lessons                       show the skill memory + promotable constrain
 forge demo                          the 60-second story
 ```
 
-## v0.3 — the Intent Thread (PRD → production traceability)
+## Intent traceability through current acceptance evidence
 
-ForgeLine now consumes SpecLine's sealed **Intent Envelope** and verifies the
-FINAL shipped code against the ORIGINAL rationalized intent — not the plan, not
-the drifted spec, but the intent that was sealed at the plan gate. This closes
-the last translation-loss gap: *does the shipped thing actually satisfy what we
-rationalized we wanted?*
+ForgeLine reads a contained, bounded SpecLine intent envelope, recomputes its
+canonical checksum and validates its `factory.acceptance-evidence.v1` records.
+Each obligation must link to applicable passing CF workflow profiles backed by
+current task completion receipts and the approved spec/plan/source identities.
+The same shared validator runs before promotion; stale or incomplete evidence
+prevents a traceable result. Source keywords and comments cannot satisfy an
+obligation. A checksum alone is insufficient.
 
-Every assumption SpecLine surfaced (auth exists, currency is single-source,
-dependencies can fail) becomes a **checkable obligation**. The `ship` gate
-blocks if the code shows no handling for an assumption the intent depended on,
-and the sealed intent hash proves the intent wasn't quietly swapped underneath
-the build. Full PRD-to-production traceability, enforced — not documented.
+Create the envelope with `specline evidence <feature>` after completing the
+approved tasks and recording CF workflow evidence. Missing integration support
+is explicit. Standalone builds without an envelope retain their separate
+shipping policy and report intent coverage as unverified.
+
+These checks establish declared traceability and local record integrity, not
+semantic correctness, independent observation, certification or release
+approval. Receipts assume a trusted local runtime.
 
 ## v0.2 — deeper QA + recursive learning
 
@@ -325,8 +330,9 @@ permissive standard for broad adoption. Pick whichever your project prefers.
 ## v0.4 — Runtime Smoke Gate (behavior-by-inspection)
 
 ForgeLine's earlier gates all verify code against *specifications* — the judge
-checks consistency, the QA audit grades static quality, the intent thread proves
-the shipped code honors the sealed envelope. That is correctness *by construction*.
+checks consistency, the QA audit grades static quality, and the intent thread
+validates declared acceptance links and current evidence hashes. These are
+distinct checks with explicit limits.
 
 None of it answers the question a per-PR preview deployment answers: **does the
 built thing actually RUN and behave correctly?** A change can pass every static
