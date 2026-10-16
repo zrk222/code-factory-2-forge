@@ -1128,7 +1128,7 @@ def test_intent_thread_no_envelope_is_untraceable(proj):
     assert not r.envelope_found
     assert any("IT_NO_ENVELOPE" in f for f in r.findings)
 
-def test_intent_thread_verifies_met_obligations(proj):
+def test_intent_thread_does_not_accept_keywords_as_verified_obligations(proj):
     import json
     from forgeline.intent_thread import verify_against_intent
     # write a sealed envelope with an auth assumption
@@ -1140,7 +1140,8 @@ def test_intent_thread_verifies_met_obligations(proj):
     d = proj/"slices"/"notifier"; d.mkdir(parents=True, exist_ok=True)
     (d/"a.py").write_text("def login(token):\n    return authenticate(token)\ndef authenticate(t): return bool(t)\n")
     r = verify_against_intent(proj, "notifier", proj)
-    assert r.envelope_found and r.obligations_met == 1 and r.traceable
+    assert r.envelope_found and r.obligations_met == 0 and not r.traceable
+    assert r.unverified_assumptions
 
 def test_intent_thread_catches_unmet_obligation(proj):
     import json

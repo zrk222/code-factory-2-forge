@@ -3,10 +3,10 @@ governance and HSF for decision compilation when a spec carries a decision
 table. Everything is a receipt; every gate failure records a skill lesson and
 routes to the refine loop."""
 from __future__ import annotations
-import hashlib, json, shutil, subprocess, sys, os
+import hashlib, json, shutil, sys, os
 from pathlib import Path
 import yaml
-from .states import State, can_transition, IllegalTransition, HUMAN_GATES
+from .states import State, can_transition, IllegalTransition
 from .run_store import RunStore
 from .ssat import ScaffoldError, load_ssat, scaffold_from_ssat, check_erosion
 from .gates import judge_consistency, grumpy_review, skill_check
@@ -564,7 +564,7 @@ class Orchestrator:
         from .intent_thread import verify_against_intent
         trace = verify_against_intent(self.root, self.feature, self.root)
         findings = trace.findings or ["intent obligations satisfied"]
-        checks = [(f"obligation_{index}", not trace.unverified_assumptions, finding,
+        checks = [(f"obligation_{index}", trace.traceable, finding,
                    FailureClass.INCONSISTENT_LOGIC)
                   for index, finding in enumerate(findings, 1)]
         attribution = _gate_attribution("intent_thread", checks)
