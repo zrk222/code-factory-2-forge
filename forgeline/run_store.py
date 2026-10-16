@@ -3,6 +3,7 @@ survives context resets (Ralph Wiggum) because the disk is the truth."""
 from __future__ import annotations
 import json, datetime, hashlib
 from pathlib import Path
+from collections.abc import Iterable
 from .states import State
 
 def _now():
@@ -53,11 +54,14 @@ class RunStore:
         with self.receipts.open("a") as f:
             f.write(json.dumps(fields, sort_keys=True) + "\n")
 
-    def latest_receipt(self, phase: str, *, strict: bool = False) -> dict | None:
-        """Return the most recent receipt for one phase without trusting state."""
+    def latest_receipts(
+        self, phases: Iterable[str], *, strict: bool = False
+    ) -> dict[str, dict | None]:
+        """Return latest receipts from one fresh read of the full history."""
+        requested = tuple(dict.fromkeys(phases))
+        latest: dict[str, dict | None] = dict.fromkeys(requested)
         if not self.receipts.exists():
-            return None
-        latest = None
+            return latest
         previous_ts = None
         for line in self.receipts.read_text(encoding="utf-8").splitlines():
             try:
@@ -69,6 +73,13 @@ class RunStore:
                 if strict:
                     raise ValueError("corrupt receipt history")
                 continue
-            if item.get("phase") == phase:
-                latest = item
+            if not isinstance(item, dict):
+                continue
+            phase = item.get("phase")
+            if isinstance(phase, str) and phase in latest:
+                latest[phase] = dict(item)
         return latest
+
+    def latest_receipt(self, phase: str, *, strict: bool = False) -> dict | None:
+        """Return the most recent receipt for one phase without trusting state."""
+        return self.latest_receipts((phase,), strict=strict)[phase]
