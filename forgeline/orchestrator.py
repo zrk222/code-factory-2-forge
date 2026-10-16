@@ -112,6 +112,12 @@ def _verify_tests_fingerprint(root: Path, feature: str, ssat_path: Path) -> dict
 
 def _verified_inputs(store: RunStore, root: Path, feature: str) -> tuple[dict, dict]:
     receipt = store.latest_receipt("verify_tests", strict=True)
+    return _verified_inputs_from_receipt(receipt, root, feature)
+
+
+def _verified_inputs_from_receipt(
+    receipt: dict | None, root: Path, feature: str
+) -> tuple[dict, dict]:
     if not receipt or receipt.get("verified") is not True:
         raise ValueError("missing verified test receipt")
     relative = receipt.get("input_components", {}).get("ssat_path")
@@ -123,8 +129,9 @@ def _verified_inputs(store: RunStore, root: Path, feature: str) -> tuple[dict, d
     return receipt, current
 
 
-def _smoke_receipt_matches(store: RunStore, verified: dict, inputs: dict) -> bool:
-    smoke = store.latest_receipt("smoke_gate", strict=True)
+def _smoke_receipt_matches_record(
+    smoke: dict | None, verified: dict, inputs: dict
+) -> bool:
     return bool(smoke and smoke.get("smoked") is True
                 and smoke.get("input_fingerprint") == inputs["sha256"]
                 and smoke.get("ts", "") >= verified.get("ts", ""))
@@ -449,12 +456,21 @@ class Orchestrator:
             return {"smoked": False,
                     "reason": "tests not verified - run `forge verify-tests` first"}
         try:
-            verified, inputs = _verified_inputs(
-                self.store, self.root.resolve(), self.feature
-            )
-            if state in {State.SMOKED, State.SHIPPED} and inputs["python_only"] and not force:
-                if _smoke_receipt_matches(self.store, verified, inputs):
+            if state in {State.SMOKED, State.SHIPPED} and not force:
+                receipts = self.store.latest_receipts(
+                    ("verify_tests", "smoke_gate"), strict=True
+                )
+                verified, inputs = _verified_inputs_from_receipt(
+                    receipts["verify_tests"], self.root.resolve(), self.feature
+                )
+                if inputs["python_only"] and _smoke_receipt_matches_record(
+                    receipts["smoke_gate"], verified, inputs
+                ):
                     return {"smoked": True, "note": "current smoke evidence reused"}
+            else:
+                verified, inputs = _verified_inputs(
+                    self.store, self.root.resolve(), self.feature
+                )
         except Exception as error:
             from .gates.runtime_smoke import SmokeReport
             rep = SmokeReport()
@@ -581,8 +597,15 @@ class Orchestrator:
 
     def _ship_evidence_current(self) -> bool:
         try:
-            verified, inputs = _verified_inputs(self.store, self.root.resolve(), self.feature)
-            current = _smoke_receipt_matches(self.store, verified, inputs)
+            receipts = self.store.latest_receipts(
+                ("verify_tests", "smoke_gate"), strict=True
+            )
+            verified, inputs = _verified_inputs_from_receipt(
+                receipts["verify_tests"], self.root.resolve(), self.feature
+            )
+            current = _smoke_receipt_matches_record(
+                receipts["smoke_gate"], verified, inputs
+            )
         except Exception:
             current = False
         if not current:

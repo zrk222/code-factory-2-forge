@@ -44,6 +44,215 @@ def test_run_store_persists_state_and_receipts(proj):
     assert (proj/".forge"/"notifier"/"receipts.jsonl").read_text().strip()
 
 
+def test_run_store_latest_receipts_batches_phases_and_returns_fresh_copies(proj):
+    store = RunStore(proj, "notifier")
+    store.receipt(phase="verify", value=1)
+    store.receipt(phase="build", value=1)
+
+    first = store.latest_receipts(("verify", "build", "missing"), strict=True)
+    assert first["verify"]["value"] == first["build"]["value"] == 1
+    assert first["missing"] is None
+    first["verify"]["value"] = 999
+    assert store.latest_receipt("verify", strict=True)["value"] == 1
+
+    store.receipt(phase="verify", value=2)
+    second = store.latest_receipts(("verify", "build", "missing"), strict=True)
+    assert second["verify"]["value"] == 2
+    assert second["build"]["value"] == 1
+    assert store.latest_receipt("verify", strict=True) == second["verify"]
+
+
+@pytest.mark.parametrize("corruption", ["hash", "malformed", "truncated", "reordered", "timestamp"])
+def test_run_store_batch_strict_rejects_corrupt_unrequested_history(
+    proj, corruption, monkeypatch
+):
+    store = RunStore(proj, "notifier")
+    stamps = iter(("2026-10-16T14:00:00+00:00", "2026-10-16T14:00:01+00:00"))
+    monkeypatch.setattr("forgeline.run_store._now", lambda: next(stamps))
+    store.receipt(phase="requested", value=1)
+    store.receipt(phase="unrequested", value=2)
+    lines = store.receipts.read_text(encoding="utf-8").splitlines()
+    if corruption == "hash":
+        lines[-1] = lines[-1].replace('"value": 2', '"value": 3')
+    elif corruption == "malformed":
+        lines.append('{"phase":"unrequested"')
+    elif corruption == "truncated":
+        lines[-1] = lines[-1][:-2]
+    elif corruption == "reordered":
+        lines.reverse()
+    else:
+        lines[-1] = lines[-1].replace('"ts": "', '"ts": "bad-')
+    store.receipts.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="corrupt receipt history"):
+        store.latest_receipts(("requested",), strict=True)
+    with pytest.raises(ValueError, match="corrupt receipt history"):
+        store.latest_receipts((), strict=True)
+
+
+def test_run_store_batch_nonstrict_skips_bad_rows_and_sees_in_place_tampering(proj):
+    store = RunStore(proj, "notifier")
+    store.receipt(phase="verify", value=1)
+    valid_line = store.receipts.read_text(encoding="utf-8").splitlines()[0]
+
+    store.receipts.write_text(
+        valid_line + "\n[]\nnull\n{\"phase\":\"verify\"\n",
+        encoding="utf-8",
+    )
+    assert store.latest_receipts(("verify",))["verify"]["value"] == 1
+    with pytest.raises(ValueError, match="corrupt receipt history"):
+        store.latest_receipts(("verify",), strict=True)
+
+    valid_line = valid_line.replace('"value": 1', '"value": 4')
+    store.receipts.write_text(valid_line + "\n", encoding="utf-8")
+    assert store.latest_receipts(("verify",))["verify"]["value"] == 4
+    with pytest.raises(ValueError, match="corrupt receipt history"):
+        store.latest_receipts(("verify",), strict=True)
+
+    store.receipts.write_text(valid_line[:-2] + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="corrupt receipt history"):
+        store.latest_receipts(("verify",), strict=True)
+
+
+def test_run_store_batch_reduces_strict_history_reads_and_validations(proj, monkeypatch):
+    import forgeline.run_store as run_store
+
+    store = RunStore(proj, "notifier")
+    phases = ("plan", "build", "verify")
+    for index in range(100):
+        store.receipt(phase=phases[index % len(phases)], index=index)
+
+    reads = 0
+    validations = 0
+    original_read_text = Path.read_text
+    original_validate = run_store._strict_receipt
+
+    def count_read(path, *args, **kwargs):
+        nonlocal reads
+        reads += path == store.receipts
+        return original_read_text(path, *args, **kwargs)
+
+    def count_validate(item, previous_ts):
+        nonlocal validations
+        validations += 1
+        return original_validate(item, previous_ts)
+
+    monkeypatch.setattr(Path, "read_text", count_read)
+    monkeypatch.setattr(run_store, "_strict_receipt", count_validate)
+    batched = store.latest_receipts(phases, strict=True)
+    assert (reads, validations) == (1, 100)
+
+    reads = validations = 0
+    separate = {
+        phase: store.latest_receipt(phase, strict=True) for phase in phases
+    }
+    assert separate == batched
+    assert (reads, validations) == (3, 300)
+
+
+@pytest.mark.parametrize("consumer", ["smoke_gate", "ship_evidence"])
+def test_orchestrator_paired_receipt_consumers_use_one_strict_history_read(
+    proj, monkeypatch, consumer
+):
+    import forgeline.run_store as run_store
+    import forgeline.orchestrator as orchestrator
+
+    instance = Orchestrator(proj, "notifier")
+    store = instance.store
+    if consumer == "smoke_gate":
+        store.set_state(State.SMOKED)
+    stamps = iter(("2026-10-16T14:00:00+00:00", "2026-10-16T14:00:01+00:00"))
+    monkeypatch.setattr(run_store, "_now", lambda: next(stamps))
+    store.receipt(
+        phase="verify_tests", verified=True, input_fingerprint="current",
+        input_components={"ssat_path": "notifier.ssat.yaml"},
+    )
+    store.receipt(
+        phase="smoke_gate", smoked=True, input_fingerprint="current",
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_verify_tests_fingerprint",
+        lambda *args: {"sha256": "current", "python_only": True},
+    )
+
+    reads = 0
+    validations = 0
+    original_read_text = Path.read_text
+    original_validate = run_store._strict_receipt
+
+    def count_read(path, *args, **kwargs):
+        nonlocal reads
+        reads += path == store.receipts
+        return original_read_text(path, *args, **kwargs)
+
+    def count_validate(item, previous_ts):
+        nonlocal validations
+        validations += 1
+        return original_validate(item, previous_ts)
+
+    monkeypatch.setattr(Path, "read_text", count_read)
+    monkeypatch.setattr(run_store, "_strict_receipt", count_validate)
+    store.latest_receipt("verify_tests", strict=True)
+    store.latest_receipt("smoke_gate", strict=True)
+    assert (reads, validations) == (2, 4)
+    reads = validations = 0
+
+    if consumer == "smoke_gate":
+        result = instance.smoke_gate()
+        assert result["smoked"] is True
+    else:
+        assert instance._ship_evidence_current() is True
+    assert (reads, validations) == (1, 2)
+
+
+def test_runtime_smoke_keeps_independent_receipt_reads_before_and_after_execution(
+    proj, monkeypatch
+):
+    import forgeline.orchestrator as orchestrator
+    from forgeline.gates.runtime_smoke import SmokeReport
+
+    instance = Orchestrator(proj, "notifier")
+    store = instance.store
+    store.set_state(State.TESTS_VERIFIED)
+    store.receipt(
+        phase="verify_tests", verified=True, input_fingerprint="current",
+        input_components={"ssat_path": "notifier.ssat.yaml"},
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_verify_tests_fingerprint",
+        lambda *args: {"sha256": "current", "python_only": True},
+    )
+    receipt_reads = 0
+    original_read_text = Path.read_text
+
+    def count_read(path, *args, **kwargs):
+        nonlocal receipt_reads
+        receipt_reads += path == store.receipts
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", count_read)
+
+    runtime_reads_before = []
+
+    def corrupt_during_smoke(*args):
+        runtime_reads_before.append(receipt_reads)
+        with store.receipts.open("a", encoding="utf-8") as stream:
+            stream.write('{"phase":"verify_tests"\n')
+        return SmokeReport()
+
+    monkeypatch.setattr(
+        "forgeline.gates.runtime_smoke.runtime_smoke", corrupt_during_smoke
+    )
+    result = instance.smoke_gate()
+
+    assert runtime_reads_before == [1]
+    assert receipt_reads == 2
+    assert result["smoked"] is False
+    assert "corrupt receipt history" in result["reason"]
+
+
 @pytest.mark.parametrize("corruption", ["green", "truncated", "reordered", "timestamp"])
 def test_run_store_strict_history_rejects_modified_rows(proj, corruption, monkeypatch):
     store = RunStore(proj, "notifier")
