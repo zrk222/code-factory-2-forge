@@ -19,7 +19,7 @@ IGNORED_DIRECTORIES = frozenset({
     "venv", "dist", "build", "coverage", ".cache", "cache", "out", "output",
     "target", "vendor", "__pycache__",
 })
-SOURCE_SUFFIXES = frozenset({".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"})
+SOURCE_SUFFIXES = frozenset({".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"})
 
 
 def language_for(path: Path) -> str:
@@ -28,7 +28,7 @@ def language_for(path: Path) -> str:
         return "python"
     if suffix in {".js", ".jsx", ".mjs", ".cjs"}:
         return "javascript"
-    if suffix in {".ts", ".tsx"}:
+    if suffix in {".ts", ".tsx", ".mts", ".cts"}:
         return "typescript"
     try:
         first = path.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
