@@ -92,6 +92,8 @@ _LANGUAGE_BY_SUFFIX = {
     ".cjs": "javascript",
     ".ts": "typescript",
     ".tsx": "typescript",
+    ".mts": "typescript",
+    ".cts": "typescript",
 }
 
 
