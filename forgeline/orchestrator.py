@@ -4,11 +4,12 @@ table. Everything is a receipt; every gate failure records a skill lesson and
 routes to the refine loop."""
 from __future__ import annotations
 import hashlib, json, shutil, sys, os
+from io import BytesIO, TextIOWrapper
 from pathlib import Path
 import yaml
 from .states import State, can_transition, IllegalTransition
 from .run_store import RunStore
-from .ssat import ScaffoldError, load_ssat, scaffold_from_ssat, check_erosion
+from .ssat import ScaffoldError, load_ssat, parse_ssat, scaffold_from_ssat, check_erosion
 from .gates import judge_consistency, grumpy_review, skill_check
 from .gates.judge import build_jev_review_packet, jev_snapshot, valid_jev_advisory
 from .gates.qa_audit import qa_audit
@@ -67,28 +68,49 @@ def _judge_failure_class(findings: list[str]) -> FailureClass:
 def _verify_tests_fingerprint(root: Path, feature: str, ssat_path: Path) -> dict:
     """Hash every verified input so stale reverse-classical receipts cannot pass."""
     from .source_scope import iter_source_files
-    from .gates.runtime_smoke import _load_manifest
+    from .gates.runtime_smoke import _load_manifest, _manifest_paths
     root = Path(root).resolve()
     ssat_path = Path(ssat_path).resolve()
     ssat_relative = ssat_path.relative_to(root).as_posix()
     if not ssat_path.is_file():
         raise ValueError("SSAT path is not a regular file")
-    ssat = load_ssat(ssat_path)
-    components: dict[str, str] = {"ssat": hashlib.sha256(Path(ssat_path).read_bytes()).hexdigest(),
-                                  "ssat_path": ssat_relative}
+    ssat_bytes = ssat_path.read_bytes()
+    ssat = parse_ssat(ssat_bytes)
+    hashes = {ssat_path: hashlib.sha256(ssat_bytes).hexdigest()}
+    components: dict[str, str] = {"ssat": hashes[ssat_path], "ssat_path": ssat_relative}
+
+    def fingerprint(path: Path, *, optional: bool = False) -> str:
+        if path not in hashes:
+            hashes[path] = ("MISSING" if optional and not path.exists()
+                            else hashlib.sha256(path.read_bytes()).hexdigest())
+        if not optional and hashes[path] == "MISSING":
+            raise ValueError("test source changed during fingerprinting")
+        return hashes[path]
+
+    manifests = {path: path.read_bytes() if path.exists() else None
+                 for path in dict.fromkeys(_manifest_paths(root, feature))}
+    for path, raw in manifests.items():
+        hashes[path] = hashlib.sha256(raw).hexdigest() if raw is not None else "MISSING"
     for path in declared_paths(root, ssat):
         key = f"source:{path.relative_to(root).as_posix()}"
-        components[key] = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "MISSING"
-    smoke_paths = [root / "smoke" / f"{feature}.json", root / "smoke" / "smoke.json"]
-    for path in smoke_paths:
-        components[f"smoke:{path.relative_to(root).as_posix()}"] = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "MISSING"
+        components[key] = fingerprint(path, optional=True)
+    for path in manifests:
+        components[f"smoke:{path.relative_to(root).as_posix()}"] = hashes[path]
     for path in iter_source_files(root):
         if path.name.startswith("test_") or path.parent.name in {"tests", "test", "__tests__"} or ".test." in path.name or ".spec." in path.name:
-            components[f"test:{path.relative_to(root).as_posix()}"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            components[f"test:{path.relative_to(root).as_posix()}"] = fingerprint(path)
     components["command"] = "forge verify-tests"
     components["tool_version"] = __version__
+
+    def captured_manifest_text(path: Path) -> str | None:
+        raw = manifests[path]
+        if raw is None:
+            return None
+        with TextIOWrapper(BytesIO(raw)) as reader:
+            return reader.read()
+
     try:
-        checks = _load_manifest(root, feature)
+        checks = _load_manifest(root, feature, read_text=captured_manifest_text)
     except (OSError, ValueError, TypeError, KeyError):
         checks = None
     shell = os.environ.get("COMSPEC", "cmd.exe") if os.name == "nt" else "/bin/sh"

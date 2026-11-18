@@ -96,7 +96,12 @@ _LANGUAGE_BY_SUFFIX = {
 
 
 def load_ssat(path: Path) -> dict:
-    return yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    return parse_ssat(Path(path).read_bytes())
+
+
+def parse_ssat(source: bytes) -> dict:
+    """Parse the same UTF-8 bytes that callers can bind in receipts."""
+    return yaml.safe_load(source.decode("utf-8"))
 
 
 def _sha256_bytes(value: bytes) -> str:
