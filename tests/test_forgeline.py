@@ -1404,9 +1404,12 @@ def test_jev_shared_adapter_roundtrip(proj, profile):
     o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
     def reviewer(packet):
         def transport(request):
-            return {"context_sha256": request["context_sha256"], "claims": [{"claim_id": "c1", "label": "INSUFFICIENT_EVIDENCE",
+            claim = {"claim_id": "c1", "label": "INSUFFICIENT_EVIDENCE",
                 "supporting_evidence_ids": [], "contradicting_evidence_ids": [], "rationale": "Evidence is insufficient.",
-                "verification_action": "Collect additional evidence."}]}
+                "verification_action": "Collect additional evidence."}
+            if request.get("review_protocol") == "contextual-evidence.v2":
+                claim["contextual_evidence"] = []
+            return {"context_sha256": request["context_sha256"], "claims": [claim]}
         return classifier.review_forgeline_packet(packet, transport=transport)
     result = o.review(proj / "notifier.ssat.yaml", material=material, reviewer=reviewer)
     assert result["reviewed"] is True and result["jev_review"]["status"] == "ADVISORY"
@@ -1438,8 +1441,11 @@ def test_jev_supported_assessment_cannot_promote_deterministic_failure(proj):
     o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
     def reviewer(packet):
         def transport(request):
-            return {"context_sha256": request["context_sha256"], "claims": [{"claim_id": "c1", "label": "SUPPORTED",
-                "supporting_evidence_ids": ["e1"], "contradicting_evidence_ids": [], "rationale": "Assessment only.", "verification_action": None}]}
+            claim = {"claim_id": "c1", "label": "SUPPORTED", "supporting_evidence_ids": ["e1"],
+                     "contradicting_evidence_ids": [], "rationale": "Assessment only.", "verification_action": None}
+            if request.get("review_protocol") == "contextual-evidence.v2":
+                claim["contextual_evidence"] = []
+            return {"context_sha256": request["context_sha256"], "claims": [claim]}
         return classifier.review_forgeline_packet(packet, transport=transport)
     result = o.review(proj / "notifier.ssat.yaml", material=material, reviewer=reviewer)
     assert result["reviewed"] is False and result["jev_review"]["claims"][0]["label"] == "SUPPORTED"
@@ -1715,6 +1721,40 @@ def test_ship_rechecks_fingerprint_after_intent_verification(proj, monkeypatch):
 
     assert result["shipped"] is False and o.store.state == State.SMOKED
     assert o.store.latest_receipt("ship")["shipped"] is False
+
+
+def test_fingerprint_reads_shared_inputs_once_per_check(tmp_path, monkeypatch):
+    from collections import Counter
+    from forgeline.orchestrator import _verify_tests_fingerprint
+
+    test_path = tmp_path / "test_shared.py"
+    test_path.write_text("def test_example():\n    assert 1 + 1 == 2\n")
+    ssat_path = tmp_path / "sample.ssat.yaml"
+    ssat_path.write_text("modules:\n  - name: shared\n    path: test_shared.py\n")
+    manifest = tmp_path / "smoke" / "smoke.json"
+    manifest.parent.mkdir()
+    checks = {"checks": [{"name": "example", "kind": "python", "run": "pass"}]}
+    manifest.write_text(json.dumps(checks))
+    original = Path.read_bytes
+    reads = Counter()
+
+    def counted(path):
+        reads[path] += 1
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counted)
+    result = _verify_tests_fingerprint(tmp_path, "smoke", ssat_path)
+    assert result["python_only"] is True
+    components = result["components"]
+    assert components["source:test_shared.py"] == components["test:test_shared.py"]
+    assert [reads[path] for path in (ssat_path, test_path, manifest)] == [1, 1, 1]
+
+    checks["checks"][0]["kind"] = "command"
+    manifest.write_text(json.dumps(checks))
+    current = _verify_tests_fingerprint(tmp_path, "smoke", ssat_path)
+    assert current["python_only"] is False
+    assert current["sha256"] != result["sha256"]
+    assert [reads[path] for path in (ssat_path, test_path, manifest)] == [2, 2, 2]
 
 
 def test_verify_tests_rejects_inputs_changed_during_execution(proj, monkeypatch):

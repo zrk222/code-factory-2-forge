@@ -93,18 +93,24 @@ class SmokeReport:
         return GateResult(attr.n_checked > 0 and attr.rate == 1.0, attr)
 
 
-def _load_manifest(root: Path, feature: str) -> list[SmokeCheck] | None:
+def _manifest_paths(root: Path, feature: str) -> tuple[Path, Path]:
+    directory = Path(root) / "smoke"
+    return directory / f"{feature}.json", directory / "smoke.json"
+
+
+def _read_manifest_text(path: Path) -> str | None:
+    return path.read_text() if path.exists() else None
+
+
+def _load_manifest(root: Path, feature: str, *, read_text=_read_manifest_text) -> list[SmokeCheck] | None:
     """A smoke manifest is JSON at smoke/<feature>.json (or smoke/smoke.json).
     Each entry declares one behavioral check. Missing manifest -> None (fail-closed
     upstream)."""
-    candidates = [
-        Path(root) / "smoke" / f"{feature}.json",
-        Path(root) / "smoke" / "smoke.json",
-    ]
-    for p in candidates:
-        if p.exists():
+    for p in _manifest_paths(root, feature):
+        text = read_text(p)
+        if text is not None:
             try:
-                data = json.loads(p.read_text())
+                data = json.loads(text)
             except json.JSONDecodeError as e:
                 raise ValueError(f"smoke manifest {p} is not valid JSON: {e}")
             checks = []
