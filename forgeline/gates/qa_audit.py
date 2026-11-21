@@ -362,6 +362,40 @@ def _record_security(report: QAReport, path: Path, parsed: dict, text: str, root
         report.unknown_security_calls.extend(f"{relative}:{name}" for name in unknown_calls)
     else:
         security_text = text
+        for item in parsed.get("unknown_sql_execs", []):
+            report.unknown_security_calls.append(
+                f"{relative}:sql.exec line {item['line']} has a dynamic or spread SQL argument"
+            )
+        # The TypeScript compiler AST has positively identified the exact
+        # Cloudflare SQLite call head. Mask only its `exec` identifier: nested
+        # argument calls and every other exec/eval occurrence remain visible to
+        # SEC_PATTERNS. Without that AST evidence there is no exception.
+        spans = parsed.get("safe_sql_exec_spans", []) if parsed.get("parser") == "typescript-compiler" else []
+        if spans:
+            chars = list(security_text)
+            lines = security_text.splitlines(keepends=True)
+            line_starts = [0]
+            for line in lines:
+                line_starts.append(line_starts[-1] + len(line))
+
+            def python_index(line_number: int, utf16_column: int) -> int | None:
+                if line_number < 0 or line_number >= len(lines):
+                    return None
+                line_text = lines[line_number].rstrip("\r\n")
+                units = 0
+                for index, character in enumerate(line_text):
+                    if units == utf16_column:
+                        return line_starts[line_number] + index
+                    units += 2 if ord(character) > 0xFFFF else 1
+                return line_starts[line_number] + len(line_text) if units == utf16_column else None
+
+            for start_line, start_column, end_line, end_column in spans:
+                start = python_index(start_line, start_column)
+                end = python_index(end_line, end_column)
+                if start is None or end is None:
+                    continue  # Unmappable parser offsets get no exemption.
+                chars[start:end] = " " * (end - start)
+            security_text = "".join(chars)
     for pattern, (severity, deduction, message) in SEC_PATTERNS.items():
         if re.search(pattern, security_text):
             report.security_score -= deduction

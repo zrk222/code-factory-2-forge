@@ -5,11 +5,12 @@ import subprocess
 import yaml
 from pathlib import Path
 import pytest
-from forgeline.states import State, can_transition, IllegalTransition
+from forgeline.states import State, can_transition
 from forgeline.run_store import RunStore
 from forgeline.orchestrator import Orchestrator
 from forgeline.ssat import ScaffoldError, load_ssat, scaffold_from_ssat, check_erosion
 from conftest import fill_good, write_smoke_manifest
+
 
 def test_state_machine_rejects_illegal_transitions():
     assert can_transition(State.INTENT, State.EXPANDED)
@@ -36,12 +37,14 @@ def test_fill_blocks_unimplemented_scaffold(proj):
     assert result["filled"] is False
     assert o.store.state == State.BLOCKED
 
+
 def test_run_store_persists_state_and_receipts(proj):
     s = RunStore(proj, "notifier")
     assert s.state == State.INTENT
-    s.set_state(State.EXPANDED, "test"); s.receipt(phase="x", ok=True)
+    s.set_state(State.EXPANDED, "test")
+    s.receipt(phase="x", ok=True)
     assert RunStore(proj, "notifier").state == State.EXPANDED
-    assert (proj/".forge"/"notifier"/"receipts.jsonl").read_text().strip()
+    assert (proj / ".forge" / "notifier" / "receipts.jsonl").read_text().strip()
 
 
 def test_run_store_latest_receipts_batches_phases_and_returns_fresh_copies(proj):
@@ -62,7 +65,9 @@ def test_run_store_latest_receipts_batches_phases_and_returns_fresh_copies(proj)
     assert store.latest_receipt("verify", strict=True) == second["verify"]
 
 
-@pytest.mark.parametrize("corruption", ["hash", "malformed", "truncated", "reordered", "timestamp"])
+@pytest.mark.parametrize(
+    "corruption", ["hash", "malformed", "truncated", "reordered", "timestamp"]
+)
 def test_run_store_batch_strict_rejects_corrupt_unrequested_history(
     proj, corruption, monkeypatch
 ):
@@ -96,7 +101,7 @@ def test_run_store_batch_nonstrict_skips_bad_rows_and_sees_in_place_tampering(pr
     valid_line = store.receipts.read_text(encoding="utf-8").splitlines()[0]
 
     store.receipts.write_text(
-        valid_line + "\n[]\nnull\n{\"phase\":\"verify\"\n",
+        valid_line + '\n[]\nnull\n{"phase":"verify"\n',
         encoding="utf-8",
     )
     assert store.latest_receipts(("verify",))["verify"]["value"] == 1
@@ -114,7 +119,9 @@ def test_run_store_batch_nonstrict_skips_bad_rows_and_sees_in_place_tampering(pr
         store.latest_receipts(("verify",), strict=True)
 
 
-def test_run_store_batch_reduces_strict_history_reads_and_validations(proj, monkeypatch):
+def test_run_store_batch_reduces_strict_history_reads_and_validations(
+    proj, monkeypatch
+):
     import forgeline.run_store as run_store
 
     store = RunStore(proj, "notifier")
@@ -143,9 +150,7 @@ def test_run_store_batch_reduces_strict_history_reads_and_validations(proj, monk
     assert (reads, validations) == (1, 100)
 
     reads = validations = 0
-    separate = {
-        phase: store.latest_receipt(phase, strict=True) for phase in phases
-    }
+    separate = {phase: store.latest_receipt(phase, strict=True) for phase in phases}
     assert separate == batched
     assert (reads, validations) == (3, 300)
 
@@ -164,11 +169,15 @@ def test_orchestrator_paired_receipt_consumers_use_one_strict_history_read(
     stamps = iter(("2026-10-16T14:00:00+00:00", "2026-10-16T14:00:01+00:00"))
     monkeypatch.setattr(run_store, "_now", lambda: next(stamps))
     store.receipt(
-        phase="verify_tests", verified=True, input_fingerprint="current",
+        phase="verify_tests",
+        verified=True,
+        input_fingerprint="current",
         input_components={"ssat_path": "notifier.ssat.yaml"},
     )
     store.receipt(
-        phase="smoke_gate", smoked=True, input_fingerprint="current",
+        phase="smoke_gate",
+        smoked=True,
+        input_fingerprint="current",
     )
     monkeypatch.setattr(
         orchestrator,
@@ -216,7 +225,9 @@ def test_runtime_smoke_keeps_independent_receipt_reads_before_and_after_executio
     store = instance.store
     store.set_state(State.TESTS_VERIFIED)
     store.receipt(
-        phase="verify_tests", verified=True, input_fingerprint="current",
+        phase="verify_tests",
+        verified=True,
+        input_fingerprint="current",
         input_components={"ssat_path": "notifier.ssat.yaml"},
     )
     monkeypatch.setattr(
@@ -288,12 +299,16 @@ def test_verify_cache_rejects_hashed_failed_receipt(proj):
         cached, previous = _verify_cache(store, state, fingerprint)
         assert previous["verified"] is False and (not cached or not cached["verified"])
 
+
 def test_scaffold_generates_signatures_from_ssat(proj):
-    ssat = load_ssat(proj/"notifier.ssat.yaml")
+    ssat = load_ssat(proj / "notifier.ssat.yaml")
     created = scaffold_from_ssat(ssat, proj)
     assert len(created) == 2
-    text = (proj/"slices"/"notifier"/"formatter.py").read_text()
-    assert "def format_message(event: dict) -> str:" in text and "NotImplementedError" in text
+    text = (proj / "slices" / "notifier" / "formatter.py").read_text()
+    assert (
+        "def format_message(event: dict) -> str:" in text
+        and "NotImplementedError" in text
+    )
 
 
 def _typescript_ssat(paths: list[str]) -> dict:
@@ -304,7 +319,9 @@ def _typescript_ssat(paths: list[str]) -> dict:
                 "name": Path(path).stem.replace("-", "_"),
                 "path": path,
                 "imports": [],
-                "functions": [{"name": "render", "args": ["name: string"], "returns": "string"}],
+                "functions": [
+                    {"name": "render", "args": ["name: string"], "returns": "string"}
+                ],
             }
             for path in paths
         ],
@@ -313,7 +330,9 @@ def _typescript_ssat(paths: list[str]) -> dict:
     }
 
 
-def test_existing_typescript_target_conflicts_without_force_and_preserves_hash(proj, capsys):
+def test_existing_typescript_target_conflicts_without_force_and_preserves_hash(
+    proj, capsys
+):
     target = proj / "src" / "memory.ts"
     target.parent.mkdir(parents=True)
     target.write_text("export const preserved = true;\n", encoding="utf-8")
@@ -321,9 +340,12 @@ def test_existing_typescript_target_conflicts_without_force_and_preserves_hash(p
     orchestrator = Orchestrator(proj, "notifier")
     orchestrator.store.set_state(State.ARCHITECTED)
     spec = proj / "typescript.ssat.yaml"
-    spec.write_text(yaml.safe_dump(_typescript_ssat(["src/memory.ts"])), encoding="utf-8")
+    spec.write_text(
+        yaml.safe_dump(_typescript_ssat(["src/memory.ts"])), encoding="utf-8"
+    )
 
     from forgeline.cli import main
+
     with pytest.raises(SystemExit) as exited:
         main(["architect", "notifier", str(spec), "--root", str(proj)])
     assert exited.value.code == 1
@@ -345,7 +367,9 @@ def test_existing_typescript_target_adopts_without_mutation_and_records_hash(pro
     )
     before = hashlib.sha256(target.read_bytes()).hexdigest()
     spec = proj / "typescript.ssat.yaml"
-    spec.write_text(yaml.safe_dump(_typescript_ssat(["src/memory.ts"])), encoding="utf-8")
+    spec.write_text(
+        yaml.safe_dump(_typescript_ssat(["src/memory.ts"])), encoding="utf-8"
+    )
     orchestrator = Orchestrator(proj, "notifier")
     orchestrator.store.set_state(State.ARCHITECTED)
 
@@ -362,7 +386,9 @@ def test_existing_typescript_target_adopts_without_mutation_and_records_hash(pro
     assert adopted[0]["after_sha256"] == before
     assert hashlib.sha256(target.read_bytes()).hexdigest() == before
     assert orchestrator.store.state == State.SCAFFOLDED
-    receipt = json.loads(orchestrator.store.receipts.read_text(encoding="utf-8").splitlines()[-1])
+    receipt = json.loads(
+        orchestrator.store.receipts.read_text(encoding="utf-8").splitlines()[-1]
+    )
     assert receipt["adopted"][0]["before_sha256"] == before
     assert receipt["ssat_sha256"] == result["ssat_sha256"]
 
@@ -385,10 +411,16 @@ def test_adopt_existing_scaffolds_only_absent_targets(proj):
 
     result = orchestrator.architect(spec, adopt_existing=True)
 
-    assert [Path(item["path"]).name for item in result["report"]["adopted"]] == ["implemented.ts"]
-    assert [Path(item["path"]).name for item in result["report"]["created"]] == ["new.ts"]
+    assert [Path(item["path"]).name for item in result["report"]["adopted"]] == [
+        "implemented.ts"
+    ]
+    assert [Path(item["path"]).name for item in result["report"]["created"]] == [
+        "new.ts"
+    ]
     assert hashlib.sha256(existing.read_bytes()).hexdigest() == before
-    assert "export function render(name: string): string" in (proj / "src" / "new.ts").read_text(encoding="utf-8")
+    assert "export function render(name: string): string" in (
+        proj / "src" / "new.ts"
+    ).read_text(encoding="utf-8")
 
 
 def test_adopt_existing_refuses_signature_drift_without_mutation_or_transition(proj):
@@ -400,7 +432,9 @@ def test_adopt_existing_refuses_signature_drift_without_mutation_or_transition(p
     )
     before = hashlib.sha256(target.read_bytes()).hexdigest()
     spec = proj / "typescript.ssat.yaml"
-    spec.write_text(yaml.safe_dump(_typescript_ssat(["src/memory.ts"])), encoding="utf-8")
+    spec.write_text(
+        yaml.safe_dump(_typescript_ssat(["src/memory.ts"])), encoding="utf-8"
+    )
     orchestrator = Orchestrator(proj, "notifier")
     orchestrator.store.set_state(State.ARCHITECTED)
 
@@ -422,11 +456,13 @@ def test_adopt_existing_refuses_global_invariant_failure_without_adoption_receip
     )
     before = hashlib.sha256(target.read_bytes()).hexdigest()
     spec_data = _typescript_ssat(["src/memory.ts"])
-    spec_data["invariants"] = [{
-        "name": "no_return",
-        "forbid_pattern": "return",
-        "scopes": [{"module": "memory", "symbol": "render", "max_lines": 10}],
-    }]
+    spec_data["invariants"] = [
+        {
+            "name": "no_return",
+            "forbid_pattern": "return",
+            "scopes": [{"module": "memory", "symbol": "render", "max_lines": 10}],
+        }
+    ]
     spec = proj / "typescript.ssat.yaml"
     spec.write_text(yaml.safe_dump(spec_data), encoding="utf-8")
     orchestrator = Orchestrator(proj, "notifier")
@@ -448,16 +484,25 @@ def test_architect_force_and_adopt_existing_are_mutually_exclusive(proj):
     target.write_text("export const preserved = true;\n", encoding="utf-8")
     before = target.read_bytes()
     spec = proj / "typescript.ssat.yaml"
-    spec.write_text(yaml.safe_dump(_typescript_ssat(["src/memory.ts"])), encoding="utf-8")
+    spec.write_text(
+        yaml.safe_dump(_typescript_ssat(["src/memory.ts"])), encoding="utf-8"
+    )
     orchestrator = Orchestrator(proj, "notifier")
     orchestrator.store.set_state(State.ARCHITECTED)
     from forgeline.cli import main
 
     with pytest.raises(SystemExit) as exited:
-        main([
-            "architect", "notifier", str(spec), "--root", str(proj),
-            "--force", "--adopt-existing",
-        ])
+        main(
+            [
+                "architect",
+                "notifier",
+                str(spec),
+                "--root",
+                str(proj),
+                "--force",
+                "--adopt-existing",
+            ]
+        )
 
     assert exited.value.code == 2
     assert target.read_bytes() == before
@@ -478,7 +523,9 @@ def test_architect_invalid_ssat_returns_structured_error_without_transition(proj
     assert orchestrator.store.state == State.ARCHITECTED
 
 
-def test_typescript_ssat_generates_typescript_and_validates_with_the_active_parser(proj):
+def test_typescript_ssat_generates_typescript_and_validates_with_the_active_parser(
+    proj,
+):
     report = scaffold_from_ssat(_typescript_ssat(["src/memory.ts"]), proj)
     target = proj / "src" / "memory.ts"
     source = target.read_text(encoding="utf-8")
@@ -486,12 +533,15 @@ def test_typescript_ssat_generates_typescript_and_validates_with_the_active_pars
     assert "export function render(name: string): string" in source
     assert "def render" not in source
     from forgeline.source_scope import analyze_source
+
     parsed = analyze_source(target, proj)
     assert parsed["status"] == "ok"
     assert parsed["parser"] in {"typescript-compiler", "node-strip-types"}
 
 
-def test_typescript_fallback_measures_symbols_without_a_project_typescript_package(proj):
+def test_typescript_fallback_measures_symbols_without_a_project_typescript_package(
+    proj,
+):
     from forgeline.source_scope import analyze_source
 
     target = proj / "services" / "canary.ts"
@@ -510,26 +560,32 @@ def test_typescript_fallback_measures_symbols_without_a_project_typescript_packa
         assert parsed["advisory_functions"] == parsed["functions"]
 
 
-def test_typescript_compiler_ast_provides_exact_symbols_and_complexity(proj, monkeypatch):
+def test_typescript_compiler_ast_provides_exact_symbols_and_complexity(
+    proj, monkeypatch
+):
     from forgeline import source_scope
     from forgeline.gates.qa_audit import qa_audit
 
     node = shutil.which("node")
-    compiler = source_scope._typescript_module_path(node, Path(__file__).resolve().parents[1])
+    compiler = source_scope._typescript_module_path(
+        node, Path(__file__).resolve().parents[1]
+    )
     assert node and compiler
-    monkeypatch.setattr(source_scope, "_typescript_module_path", lambda _node, _root: compiler)
+    monkeypatch.setattr(
+        source_scope, "_typescript_module_path", lambda _node, _root: compiler
+    )
     feature = proj / "services" / "inventory.ts"
     feature.parent.mkdir()
     feature.write_text(
-        '// branch words if { } in a comment\n'
-        'export const multiline = (value: string) => {\n'
+        "// branch words if { } in a comment\n"
+        "export const multiline = (value: string) => {\n"
         '  const marker = "if { while }";\n'
-        '  if (value) return marker;\n'
+        "  if (value) return marker;\n"
         '  return "}";\n'
-        '};\n'
+        "};\n"
         'export class First { method(value: string) { if (value) return value; return ""; } }\n'
         'export class Second { method(value: string) { return value ? value : ""; } }\n'
-        'export const expression = (value: number) => value ? value : 0;\n',
+        "export const expression = (value: number) => value ? value : 0;\n",
         encoding="utf-8",
     )
     parsed = source_scope.analyze_source(feature, proj)
@@ -540,26 +596,32 @@ def test_typescript_compiler_ast_provides_exact_symbols_and_complexity(proj, mon
     assert parsed["function_metrics_status"] == "exact"
     assert names.count("method") == 2
     assert {"multiline", "expression"}.issubset(names)
-    expression = next(item for item in parsed["functions"] if item["name"] == "expression")
+    expression = next(
+        item for item in parsed["functions"] if item["name"] == "expression"
+    )
     assert expression["complexity"] == 2
     assert report.metrics["function_inventory_complete"] is True
     assert report.function_inventory[0]["parser"] == "typescript-compiler"
     assert not report.advisory_function_metrics
 
 
-def test_typescript_fallback_is_advisory_and_cannot_pass_hard_inventory(proj, monkeypatch):
+def test_typescript_fallback_is_advisory_and_cannot_pass_hard_inventory(
+    proj, monkeypatch
+):
     from forgeline import source_scope
     from forgeline.gates.qa_audit import qa_audit
 
-    monkeypatch.setattr(source_scope, "_typescript_compiler_parse", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        source_scope, "_typescript_compiler_parse", lambda *_args, **_kwargs: None
+    )
     feature = proj / "services" / "fallback.ts"
     feature.parent.mkdir()
     feature.write_text(
-        'export const fallback = (value: string) => {\n'
+        "export const fallback = (value: string) => {\n"
         '  const marker = "if { while }";\n'
-        '  if (value) return marker;\n'
+        "  if (value) return marker;\n"
         '  return "}";\n'
-        '};\n',
+        "};\n",
         encoding="utf-8",
     )
 
@@ -580,11 +642,13 @@ def test_javascript_scanner_metrics_are_advisory_without_compiler(proj, monkeypa
     from forgeline import source_scope
     from forgeline.gates.qa_audit import qa_audit
 
-    monkeypatch.setattr(source_scope, "_typescript_compiler_parse", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        source_scope, "_typescript_compiler_parse", lambda *_args, **_kwargs: None
+    )
     feature = proj / "services" / "fallback.mjs"
     feature.parent.mkdir()
     feature.write_text(
-        '// if words and braces { } are only a comment\n'
+        "// if words and braces { } are only a comment\n"
         'export function fallback(value) { const marker = "while { }"; if (value) return marker; return "}"; }\n',
         encoding="utf-8",
     )
@@ -605,13 +669,20 @@ def test_typescript_exact_complexity_above_limit_is_blocked(proj, monkeypatch):
     from forgeline.gates.qa_audit import qa_audit
 
     node = shutil.which("node")
-    compiler = source_scope._typescript_module_path(node, Path(__file__).resolve().parents[1])
+    compiler = source_scope._typescript_module_path(
+        node, Path(__file__).resolve().parents[1]
+    )
     assert node and compiler
-    monkeypatch.setattr(source_scope, "_typescript_module_path", lambda _node, _root: compiler)
+    monkeypatch.setattr(
+        source_scope, "_typescript_module_path", lambda _node, _root: compiler
+    )
     feature = proj / "services" / "complex.ts"
     feature.parent.mkdir()
     branches = "".join(f"  if (v === {index}) return true;\n" for index in range(11))
-    feature.write_text(f"export function tooComplex(v: number) {{\n{branches}  return false;\n}}\n", encoding="utf-8")
+    feature.write_text(
+        f"export function tooComplex(v: number) {{\n{branches}  return false;\n}}\n",
+        encoding="utf-8",
+    )
 
     report = qa_audit(proj, source_paths=[feature])
 
@@ -620,14 +691,20 @@ def test_typescript_exact_complexity_above_limit_is_blocked(proj, monkeypatch):
     assert report.passed is False
 
 
-def test_typescript_export_lists_and_default_identifiers_enter_hard_inventory(proj, monkeypatch):
+def test_typescript_export_lists_and_default_identifiers_enter_hard_inventory(
+    proj, monkeypatch
+):
     from forgeline import source_scope
     from forgeline.gates.qa_audit import qa_audit
 
     node = shutil.which("node")
-    compiler = source_scope._typescript_module_path(node, Path(__file__).resolve().parents[1])
+    compiler = source_scope._typescript_module_path(
+        node, Path(__file__).resolve().parents[1]
+    )
     assert node and compiler
-    monkeypatch.setattr(source_scope, "_typescript_module_path", lambda _node, _root: compiler)
+    monkeypatch.setattr(
+        source_scope, "_typescript_module_path", lambda _node, _root: compiler
+    )
     feature = proj / "services" / "indirect-exports.ts"
     feature.parent.mkdir()
     branches = "".join(f"  if (v === {index}) return true;\n" for index in range(11))
@@ -647,9 +724,16 @@ def test_typescript_export_lists_and_default_identifiers_enter_hard_inventory(pr
 
     assert parsed["function_metrics_status"] == "exact"
     public_functions = [item for item in parsed["functions"] if item["public"]]
-    assert {item["name"] for item in public_functions} == {"listed", "defaulted", "internal"}
+    assert {item["name"] for item in public_functions} == {
+        "listed",
+        "defaulted",
+        "internal",
+    }
     assert sum(item["name"] == "listed" for item in public_functions) == 1
-    assert any(item["name"] == "listed" and not item["public"] and item["complexity"] > 10 for item in parsed["functions"])
+    assert any(
+        item["name"] == "listed" and not item["public"] and item["complexity"] > 10
+        for item in parsed["functions"]
+    )
     assert report.max_complexity > 10
     assert any(item.startswith("QA_COMPLEXITY") for item in report.findings)
     assert report.passed is False
@@ -659,7 +743,10 @@ def test_invalid_generated_typescript_is_rejected_before_scaffold_write(proj):
     from forgeline.source_scope import validate_generated_script
 
     with pytest.raises(ValueError):
-        validate_generated_script("export function broken(name: string): string {\n", proj / "src" / "broken.ts")
+        validate_generated_script(
+            "export function broken(name: string): string {\n",
+            proj / "src" / "broken.ts",
+        )
 
 
 def test_mjs_ssat_generates_valid_esm_without_python_syntax(proj):
@@ -671,14 +758,22 @@ def test_mjs_ssat_generates_valid_esm_without_python_syntax(proj):
     assert "def render" not in source
     node = shutil.which("node")
     if node is not None:
-        completed = subprocess.run([node, "--check", str(target)], capture_output=True, text=True)
+        completed = subprocess.run(
+            [node, "--check", str(target)], capture_output=True, text=True
+        )
         assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
-def test_mixed_language_ssat_generates_each_language_and_rejects_unknown_extensions(proj):
-    report = scaffold_from_ssat(_typescript_ssat(["src/memory.ts", "src/worker.py"]), proj)
+def test_mixed_language_ssat_generates_each_language_and_rejects_unknown_extensions(
+    proj,
+):
+    report = scaffold_from_ssat(
+        _typescript_ssat(["src/memory.ts", "src/worker.py"]), proj
+    )
     assert len(report.created) == 2
-    assert "export function render" in (proj / "src" / "memory.ts").read_text(encoding="utf-8")
+    assert "export function render" in (proj / "src" / "memory.ts").read_text(
+        encoding="utf-8"
+    )
     assert "def render" in (proj / "src" / "worker.py").read_text(encoding="utf-8")
     with pytest.raises(ScaffoldError) as raised:
         scaffold_from_ssat(_typescript_ssat(["src/not-supported.go"]), proj)
@@ -686,7 +781,9 @@ def test_mixed_language_ssat_generates_each_language_and_rejects_unknown_extensi
     assert not (proj / "src" / "not-supported.go").exists()
 
 
-def test_scaffold_second_write_failure_restores_prior_files_byte_for_byte(proj, monkeypatch):
+def test_scaffold_second_write_failure_restores_prior_files_byte_for_byte(
+    proj, monkeypatch
+):
     spec = _typescript_ssat(["src/a.ts", "src/b.ts"])
     first = proj / "src" / "a.ts"
     second = proj / "src" / "b.ts"
@@ -696,6 +793,7 @@ def test_scaffold_second_write_failure_restores_prior_files_byte_for_byte(proj, 
     original_first, original_second = first.read_bytes(), second.read_bytes()
 
     from forgeline import ssat as ssat_module
+
     real_replace = ssat_module.os.replace
 
     def fail_second_temp(source, target):
@@ -716,17 +814,30 @@ def test_scaffold_report_never_calls_preexisting_target_created(proj):
     target = proj / "src" / "present.ts"
     target.parent.mkdir(parents=True)
     target.write_text("export const before = true;\n", encoding="utf-8")
-    report = scaffold_from_ssat(_typescript_ssat(["src/present.ts", "src/new.ts"]), proj, force=True)
+    report = scaffold_from_ssat(
+        _typescript_ssat(["src/present.ts", "src/new.ts"]), proj, force=True
+    )
     assert [Path(item.path).name for item in report.created] == ["new.ts"]
     assert [Path(item.path).name for item in report.overwritten] == ["present.ts"]
 
 
-def test_architect_illegal_transition_returns_structured_error_without_traceback(proj, capsys):
+def test_architect_illegal_transition_returns_structured_error_without_traceback(
+    proj, capsys
+):
     orchestrator = Orchestrator(proj, "notifier")
     orchestrator.store.set_state(State.EXPANDED)
     from forgeline.cli import main
+
     with pytest.raises(SystemExit) as exited:
-        main(["architect", "notifier", str(proj / "notifier.ssat.yaml"), "--root", str(proj)])
+        main(
+            [
+                "architect",
+                "notifier",
+                str(proj / "notifier.ssat.yaml"),
+                "--root",
+                str(proj),
+            ]
+        )
     assert exited.value.code == 1
     captured = capsys.readouterr()
     assert "Traceback" not in captured.err
@@ -743,44 +854,61 @@ def test_architect_illegal_transition_returns_structured_error_without_traceback
 
 def test_status_and_missing_qa_contract_use_feature(proj, capsys):
     from forgeline.cli import main
+
     main(["status", "notifier", "--root", str(proj)])
-    assert json.loads(capsys.readouterr().out)["next"] == "forge expand notifier (draft use cases; signoff)"
+    assert (
+        json.loads(capsys.readouterr().out)["next"]
+        == "forge expand notifier (draft use cases; signoff)"
+    )
     with pytest.raises(SystemExit) as exited:
         main(["qa", "notifier", "--root", str(proj)])
     assert exited.value.code == 2
     missing = json.loads(capsys.readouterr().out)
-    assert missing["error"]["next"] == "forge qa notifier --ssat <notifier.ssat.yaml> --root ."
+    assert (
+        missing["error"]["next"]
+        == "forge qa notifier --ssat <notifier.ssat.yaml> --root ."
+    )
+
 
 def test_arch_erosion_detects_signature_drift(proj):
-    ssat = load_ssat(proj/"notifier.ssat.yaml")
+    ssat = load_ssat(proj / "notifier.ssat.yaml")
     scaffold_from_ssat(ssat, proj)
     # drift: change the signature
-    f = proj/"slices"/"notifier"/"formatter.py"
+    f = proj / "slices" / "notifier" / "formatter.py"
     f.write_text('def format_message(evt: dict, extra: int) -> str:\n    return ""\n')
     v = check_erosion(ssat, proj)
     assert any(x.code == "E_SIG_DRIFT" for x in v)
 
+
 def test_arch_erosion_detects_illegal_dependency(proj):
-    ssat = load_ssat(proj/"notifier.ssat.yaml")
+    ssat = load_ssat(proj / "notifier.ssat.yaml")
     scaffold_from_ssat(ssat, proj)
     # formatter must NOT import sender (no such edge in SSAT)
-    f = proj/"slices"/"notifier"/"formatter.py"
-    f.write_text('from slices.notifier.sender import send\ndef format_message(event: dict) -> str:\n    return ""\n')
+    f = proj / "slices" / "notifier" / "formatter.py"
+    f.write_text(
+        'from slices.notifier.sender import send\ndef format_message(event: dict) -> str:\n    return ""\n'
+    )
     v = check_erosion(ssat, proj)
     assert any(x.code == "E_ILLEGAL_DEP" for x in v)
 
+
 def test_arch_erosion_detects_invariant_violation(proj):
-    ssat = load_ssat(proj/"notifier.ssat.yaml")
+    ssat = load_ssat(proj / "notifier.ssat.yaml")
     scaffold_from_ssat(ssat, proj)
-    f = proj/"slices"/"notifier"/"formatter.py"
-    f.write_text('def format_message(event: dict) -> str:\n    return str(eval("1+1"))\n')
+    f = proj / "slices" / "notifier" / "formatter.py"
+    f.write_text(
+        'def format_message(event: dict) -> str:\n    return str(eval("1+1"))\n'
+    )
     v = check_erosion(ssat, proj)
     assert any(x.code == "E_INVARIANT" for x in v)
 
+
 def test_grumpy_adversary_demands_tests_and_catches_danger(proj):
     from forgeline.gates import grumpy_review
-    d = proj/"slices"/"notifier"; d.mkdir(parents=True, exist_ok=True)
-    (d/"formatter.py").write_text('def f():\n    return eval("2")\n')
+
+    d = proj / "slices" / "notifier"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "formatter.py").write_text('def f():\n    return eval("2")\n')
     ok, complaints = grumpy_review(proj)
     assert not ok
     joined = " ".join(complaints)
@@ -802,12 +930,17 @@ def test_scoped_adversary_limits_subprocess_to_exact_declared_python_symbol(proj
         encoding="utf-8",
     )
     (proj / "tests").mkdir()
-    (proj / "tests" / "test_worker.py").write_text("def test_worker(): pass\n", encoding="utf-8")
+    (proj / "tests" / "test_worker.py").write_text(
+        "def test_worker(): pass\n", encoding="utf-8"
+    )
     modules = [{"name": "worker", "path": "src/worker.py"}]
     scopes = [{"module": "worker", "symbol": "target", "max_lines": 10}]
 
     scoped_ok, scoped_findings = grumpy_review(
-        proj, source_paths=(path for path in [source]), review_scopes=scopes, declared_modules=modules,
+        proj,
+        source_paths=(path for path in [source]),
+        review_scopes=scopes,
+        declared_modules=modules,
     )
     assert scoped_ok, scoped_findings
     unscoped_ok, unscoped_findings = grumpy_review(proj, source_paths=[source])
@@ -815,25 +948,37 @@ def test_scoped_adversary_limits_subprocess_to_exact_declared_python_symbol(proj
     assert any("A_SUBPROC" in finding for finding in unscoped_findings)
 
 
-@pytest.mark.parametrize("body", [
-    "import subprocess\n    subprocess.run(['x'])\n",
-    "from subprocess import run as execute\n    execute(['x'])\n",
-    "import subprocess as process\n    process.run(['x'])\n",
-    "__import__('subprocess').run(['x'])\n",
-    "import importlib as loader\n    loader.import_module('subprocess').run(['x'])\n",
-    "from importlib import import_module as load\n    load('subprocess').run(['x'])\n",
-    "import subprocess as process\n    getattr(process, 'run')(['x'])\n",
-])
-def test_scoped_adversary_rejects_raw_imported_aliased_and_dynamic_subprocess(proj, body):
+@pytest.mark.parametrize(
+    "body",
+    [
+        "import subprocess\n    subprocess.run(['x'])\n",
+        "from subprocess import run as execute\n    execute(['x'])\n",
+        "import subprocess as process\n    process.run(['x'])\n",
+        "__import__('subprocess').run(['x'])\n",
+        "import importlib as loader\n    loader.import_module('subprocess').run(['x'])\n",
+        "from importlib import import_module as load\n    load('subprocess').run(['x'])\n",
+        "import subprocess as process\n    getattr(process, 'run')(['x'])\n",
+    ],
+)
+def test_scoped_adversary_rejects_raw_imported_aliased_and_dynamic_subprocess(
+    proj, body
+):
     from forgeline.gates import grumpy_review
 
     source = proj / "src" / "worker.py"
     source.parent.mkdir()
-    source.write_text("def target():\n" + "".join(f"    {line}" for line in body.splitlines(keepends=True)), encoding="utf-8")
+    source.write_text(
+        "def target():\n"
+        + "".join(f"    {line}" for line in body.splitlines(keepends=True)),
+        encoding="utf-8",
+    )
     (proj / "tests").mkdir()
-    (proj / "tests" / "test_worker.py").write_text("def test_worker(): pass\n", encoding="utf-8")
+    (proj / "tests" / "test_worker.py").write_text(
+        "def test_worker(): pass\n", encoding="utf-8"
+    )
     ok, findings = grumpy_review(
-        proj, source_paths=[source],
+        proj,
+        source_paths=[source],
         review_scopes=[{"module": "worker", "symbol": "target", "max_lines": 20}],
         declared_modules=[{"name": "worker", "path": "src/worker.py"}],
     )
@@ -841,28 +986,36 @@ def test_scoped_adversary_rejects_raw_imported_aliased_and_dynamic_subprocess(pr
     assert any("A_SUBPROC" in finding for finding in findings)
 
 
-@pytest.mark.parametrize("source_text", [
-    "import subprocess as process\nalias = process\ndef target():\n    alias.run(['x'])\n",
-    "from subprocess import *\ndef target():\n    run(['x'])\n",
-    "import subprocess as process\ndef target(command=process.run):\n    return command\n",
-    "import subprocess as process\nclass target:\n    def run(self):\n        return process.run(['x'])\n",
-    "import importlib\nloader = importlib.import_module\ndef target():\n    loader('subprocess')\n",
-    "loader = __import__\ndef target():\n    loader('subprocess')\n",
-    "from builtins import __import__ as load\ndef target(name):\n    return load(name).run(['x'])\n",
-    "import builtins as bi\ndef target(name):\n    return bi.__import__(name).run(['x'])\n",
-    "import builtins as bi\nload = bi.__import__\ndef target(name):\n    return load(name).run(['x'])\n",
-    "import builtins as bi\ndef target(name):\n    return getattr(bi, '__import__')(name).run(['x'])\n",
-])
-def test_scoped_adversary_rejects_module_alias_chains_and_wildcard_imports(proj, source_text):
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        "import subprocess as process\nalias = process\ndef target():\n    alias.run(['x'])\n",
+        "from subprocess import *\ndef target():\n    run(['x'])\n",
+        "import subprocess as process\ndef target(command=process.run):\n    return command\n",
+        "import subprocess as process\nclass target:\n    def run(self):\n        return process.run(['x'])\n",
+        "import importlib\nloader = importlib.import_module\ndef target():\n    loader('subprocess')\n",
+        "loader = __import__\ndef target():\n    loader('subprocess')\n",
+        "from builtins import __import__ as load\ndef target(name):\n    return load(name).run(['x'])\n",
+        "import builtins as bi\ndef target(name):\n    return bi.__import__(name).run(['x'])\n",
+        "import builtins as bi\nload = bi.__import__\ndef target(name):\n    return load(name).run(['x'])\n",
+        "import builtins as bi\ndef target(name):\n    return getattr(bi, '__import__')(name).run(['x'])\n",
+    ],
+)
+def test_scoped_adversary_rejects_module_alias_chains_and_wildcard_imports(
+    proj, source_text
+):
     from forgeline.gates import grumpy_review
 
     source = proj / "src" / "worker.py"
     source.parent.mkdir()
     source.write_text(source_text, encoding="utf-8")
     (proj / "tests").mkdir()
-    (proj / "tests" / "test_worker.py").write_text("def test_worker(): pass\n", encoding="utf-8")
+    (proj / "tests" / "test_worker.py").write_text(
+        "def test_worker(): pass\n", encoding="utf-8"
+    )
     ok, findings = grumpy_review(
-        proj, source_paths=[source],
+        proj,
+        source_paths=[source],
         review_scopes=[{"module": "worker", "symbol": "target", "max_lines": 20}],
         declared_modules=[{"name": "worker", "path": "src/worker.py"}],
     )
@@ -870,18 +1023,63 @@ def test_scoped_adversary_rejects_module_alias_chains_and_wildcard_imports(proj,
     assert any("A_SUBPROC" in finding for finding in findings)
 
 
-@pytest.mark.parametrize("scopes,modules,expected", [
-    ([], [{"name": "worker", "path": "src/worker.py"}], "non-empty list"),
-    (None, [{"name": "worker", "path": "src/worker.py"}], "non-empty list"),
-    ([{"module": "worker", "symbol": "target", "max_lines": 10, "note": "unreviewed"}], [{"name": "worker", "path": "src/worker.py"}], "only module, symbol, and max_lines"),
-    ([{"module": "missing", "symbol": "target", "max_lines": 10}], [{"name": "worker", "path": "src/worker.py"}], "unknown declared module"),
-    ([{"module": "worker", "symbol": "target", "max_lines": 1001}], [{"name": "worker", "path": "src/worker.py"}], "max_lines"),
-    ([{"module": "worker", "symbol": "target", "max_lines": 10}, {"module": "worker", "symbol": "target", "max_lines": 10}], [{"name": "worker", "path": "src/worker.py"}], "duplicate symbol"),
-    ([{"module": "worker", "symbol": "target", "max_lines": 1}], [{"name": "worker", "path": "src/worker.py"}], "exceeds max_lines"),
-    ([{"module": "worker", "symbol": "missing", "max_lines": 10}], [{"name": "worker", "path": "src/worker.py"}], "expected one exact"),
-    ([{"module": "worker", "symbol": "target", "max_lines": 10}], [{"name": "worker", "path": "../outside.py"}], "escapes source root"),
-    ([{"module": "worker", "symbol": "target", "max_lines": 10}], [{"name": "worker", "path": "src/worker.js"}], "only Python AST"),
-])
+@pytest.mark.parametrize(
+    "scopes,modules,expected",
+    [
+        ([], [{"name": "worker", "path": "src/worker.py"}], "non-empty list"),
+        (None, [{"name": "worker", "path": "src/worker.py"}], "non-empty list"),
+        (
+            [
+                {
+                    "module": "worker",
+                    "symbol": "target",
+                    "max_lines": 10,
+                    "note": "unreviewed",
+                }
+            ],
+            [{"name": "worker", "path": "src/worker.py"}],
+            "only module, symbol, and max_lines",
+        ),
+        (
+            [{"module": "missing", "symbol": "target", "max_lines": 10}],
+            [{"name": "worker", "path": "src/worker.py"}],
+            "unknown declared module",
+        ),
+        (
+            [{"module": "worker", "symbol": "target", "max_lines": 1001}],
+            [{"name": "worker", "path": "src/worker.py"}],
+            "max_lines",
+        ),
+        (
+            [
+                {"module": "worker", "symbol": "target", "max_lines": 10},
+                {"module": "worker", "symbol": "target", "max_lines": 10},
+            ],
+            [{"name": "worker", "path": "src/worker.py"}],
+            "duplicate symbol",
+        ),
+        (
+            [{"module": "worker", "symbol": "target", "max_lines": 1}],
+            [{"name": "worker", "path": "src/worker.py"}],
+            "exceeds max_lines",
+        ),
+        (
+            [{"module": "worker", "symbol": "missing", "max_lines": 10}],
+            [{"name": "worker", "path": "src/worker.py"}],
+            "expected one exact",
+        ),
+        (
+            [{"module": "worker", "symbol": "target", "max_lines": 10}],
+            [{"name": "worker", "path": "../outside.py"}],
+            "escapes source root",
+        ),
+        (
+            [{"module": "worker", "symbol": "target", "max_lines": 10}],
+            [{"name": "worker", "path": "src/worker.js"}],
+            "only Python AST",
+        ),
+    ],
+)
 def test_scoped_adversary_invalid_scopes_fail_closed(proj, scopes, modules, expected):
     from forgeline.gates import grumpy_review
 
@@ -889,12 +1087,19 @@ def test_scoped_adversary_invalid_scopes_fail_closed(proj, scopes, modules, expe
     source.parent.mkdir()
     source.write_text("def target():\n    return 'ok'\n", encoding="utf-8")
     (proj / "tests").mkdir()
-    (proj / "tests" / "test_worker.py").write_text("def test_worker(): pass\n", encoding="utf-8")
+    (proj / "tests" / "test_worker.py").write_text(
+        "def test_worker(): pass\n", encoding="utf-8"
+    )
     ok, findings = grumpy_review(
-        proj, source_paths=[source], review_scopes=scopes, declared_modules=modules,
+        proj,
+        source_paths=[source],
+        review_scopes=scopes,
+        declared_modules=modules,
     )
     assert not ok
-    assert any("A_REVIEW_SCOPE" in finding and expected in finding for finding in findings)
+    assert any(
+        "A_REVIEW_SCOPE" in finding and expected in finding for finding in findings
+    )
 
 
 def test_orchestrator_reports_scoped_adversary_boundary_and_rejects_null_scopes(proj):
@@ -908,7 +1113,9 @@ def test_orchestrator_reports_scoped_adversary_boundary_and_rejects_null_scopes(
 
     scoped = orchestrator.review(spec_path)
     assert scoped["adversary_scope"]["mode"] == "explicit_symbols"
-    assert "not a full-module safety certificate" in scoped["adversary_scope"]["coverage"]
+    assert (
+        "not a full-module safety certificate" in scoped["adversary_scope"]["coverage"]
+    )
 
     spec["review_scopes"] = None
     spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
@@ -917,18 +1124,21 @@ def test_orchestrator_reports_scoped_adversary_boundary_and_rejects_null_scopes(
     assert rejected["reviewed"] is False
     assert any("A_REVIEW_SCOPE" in finding for finding in rejected["findings"])
 
+
 def test_judge_catches_unfilled_stubs(proj):
     from forgeline.gates import judge_consistency
-    ssat = load_ssat(proj/"notifier.ssat.yaml")
+
+    ssat = load_ssat(proj / "notifier.ssat.yaml")
     scaffold_from_ssat(ssat, proj)  # leaves NotImplementedError stubs
     ok, findings = judge_consistency(ssat, proj)
     assert not ok and any("J_STUB" in f for f in findings)
+
 
 def test_judge_consistency_keeps_standalone_erosion_check(proj, monkeypatch):
     from forgeline.gates import judge_consistency
     import forgeline.gates.judge as judge_module
 
-    ssat = load_ssat(proj/"notifier.ssat.yaml")
+    ssat = load_ssat(proj / "notifier.ssat.yaml")
     fill_good(proj)
     calls = []
     original = judge_module.check_erosion
@@ -943,6 +1153,7 @@ def test_judge_consistency_keeps_standalone_erosion_check(proj, monkeypatch):
     assert result == (True, [])
     assert len(calls) == 1
 
+
 @pytest.mark.parametrize("drift", [False, True])
 def test_review_reuses_one_invocation_local_erosion_result(proj, monkeypatch, drift):
     import forgeline.gates.judge as judge_module
@@ -950,7 +1161,7 @@ def test_review_reuses_one_invocation_local_erosion_result(proj, monkeypatch, dr
 
     fill_good(proj)
     if drift:
-        (proj/"slices/notifier/formatter.py").write_text(
+        (proj / "slices/notifier/formatter.py").write_text(
             'def format_message(event: dict, extra: int) -> str:\n    return "changed"\n'
         )
 
@@ -974,7 +1185,7 @@ def test_review_reuses_one_invocation_local_erosion_result(proj, monkeypatch, dr
     runner = Orchestrator(proj, "notifier")
     runner.store.set_state(State.FILLED)
 
-    result = runner.review(proj/"notifier.ssat.yaml")
+    result = runner.review(proj / "notifier.ssat.yaml")
 
     assert len(erosion_calls) == 1
     assert len(judge_inputs) == 1 and judge_inputs[0] is erosion_calls[0]
@@ -986,75 +1197,96 @@ def test_review_reuses_one_invocation_local_erosion_result(proj, monkeypatch, dr
     else:
         assert result["reviewed"] is True
 
+
 def test_full_happy_path_intent_to_ship(proj):
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.EXPANDED); o.store.set_state(State.ARCHITECTED)
-    o.architect(proj/"notifier.ssat.yaml")
+    o.store.set_state(State.EXPANDED)
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
     assert o.store.state == State.SCAFFOLDED
     fill_good(proj)
     o.store.set_state(State.FILLED)
-    r = o.review(proj/"notifier.ssat.yaml")
+    r = o.review(proj / "notifier.ssat.yaml")
     assert r["reviewed"] is True and o.store.state == State.REVIEWED
-    g = o.arch_gate(proj/"notifier.ssat.yaml")
+    g = o.arch_gate(proj / "notifier.ssat.yaml")
     assert g["passed"] and o.store.state == State.ARCH_GATED
     write_smoke_manifest(proj)
-    assert o.verify_tests(proj/"notifier.ssat.yaml")["verified"] and o.store.state == State.TESTS_VERIFIED
+    assert (
+        o.verify_tests(proj / "notifier.ssat.yaml")["verified"]
+        and o.store.state == State.TESTS_VERIFIED
+    )
     assert o.smoke_gate()["smoked"] and o.store.state == State.SMOKED
     assert o.ship()["shipped"] and o.store.state == State.SHIPPED
+
 
 def test_refine_loop_records_skill_lessons(proj):
     o = Orchestrator(proj, "notifier")
     o.store.set_state(State.ARCHITECTED)
-    o.architect(proj/"notifier.ssat.yaml")
+    o.architect(proj / "notifier.ssat.yaml")
     o.store.set_state(State.FILLED)  # but leave stubs unfilled -> review fails
-    r = o.review(proj/"notifier.ssat.yaml")
+    r = o.review(proj / "notifier.ssat.yaml")
     assert r["reviewed"] is False
-    lessons = (proj/"skills"/"lessons.jsonl")
+    lessons = proj / "skills" / "lessons.jsonl"
     assert lessons.exists() and lessons.read_text().strip()
     assert "lessons_for_next" in r  # injected into next attempt's context
 
+
 def test_skill_lessons_promote_to_constraints(proj):
     from forgeline.skill_memory import record_lesson, promotable_constraints
+
     for _ in range(3):
-        record_lesson(proj, phase="fill", failure_code="A_EVAL", fix="never use eval", feature="x")
+        record_lesson(
+            proj, phase="fill", failure_code="A_EVAL", fix="never use eval", feature="x"
+        )
     promo = promotable_constraints(proj, threshold=3)
     assert any(p["failure_code"] == "A_EVAL" and p["count"] >= 3 for p in promo)
 
+
 def test_handoff_detects_decision_table(proj, monkeypatch):
     # simulate a spec with a decision table; specline may or may not be importable
-    spec = proj/"spec.md"
-    spec.write_text("## Decision logic\n| # | if | then |\n|---|----|------|\n| 1 | x == true | APPROVED: ok |\n| 2 | else | DENIED: no |\n")
+    spec = proj / "spec.md"
+    spec.write_text(
+        "## Decision logic\n| # | if | then |\n|---|----|------|\n| 1 | x == true | APPROVED: ok |\n| 2 | else | DENIED: no |\n"
+    )
     o = Orchestrator(proj, "notifier")
     r = o.handoff_decisions(spec)
     # returns None if specline not importable, else finds 2 rules — both acceptable
     assert r is None or r["decision_rules"] == 2
 
+
 def test_agent_wire_creates_entry_point_skill(proj):
     from forgeline.adapters import wire_agent
+
     wire_agent(proj, "claude")
-    assert (proj/"CLAUDE.md").exists() and "executable contract" in (proj/"CLAUDE.md").read_text()
-    assert (proj/".claude"/"skills"/"forge.md").exists()
+    assert (proj / "CLAUDE.md").exists() and "executable contract" in (
+        proj / "CLAUDE.md"
+    ).read_text()
+    assert (proj / ".claude" / "skills" / "forge.md").exists()
     wire_agent(proj, "codex")
-    assert (proj/"AGENTS.md").exists()
+    assert (proj / "AGENTS.md").exists()
 
 
 # ============ recursive learning + deep QA (v0.2 upgrades) ============
 def test_qa_audit_grades_quality(proj):
     from forgeline.gates.qa_audit import qa_audit
     from forgeline.ssat import load_ssat, scaffold_from_ssat
-    scaffold_from_ssat(load_ssat(proj/"notifier.ssat.yaml"), proj)
+
+    scaffold_from_ssat(load_ssat(proj / "notifier.ssat.yaml"), proj)
     fill_good(proj)
     r = qa_audit(proj)
-    assert r.grade in ("A","B") and r.passed
+    assert r.grade in ("A", "B") and r.passed
     assert r.coverage_intent > 0 and r.doc_ratio > 0
     assert r.attribution.n_checked > 0
 
+
 def test_qa_audit_catches_security_and_complexity(proj):
     from forgeline.gates.qa_audit import qa_audit
-    d = proj/"slices"/"bad"; d.mkdir(parents=True)
-    (d/"danger.py").write_text(
-        "def run(x):\n"
-        "    return eval(x)\n")  # eval => critical security hit
+
+    d = proj / "slices" / "bad"
+    d.mkdir(parents=True)
+    (d / "danger.py").write_text(
+        "def run(x):\n    return eval(x)\n"
+    )  # eval => critical security hit
     r = qa_audit(proj)
     assert r.security_score < 100
     assert any("QA_SEC" in f for f in r.findings)
@@ -1066,7 +1298,9 @@ def test_qa_prunes_dependency_and_factory_generated_trees(proj, monkeypatch):
     from forgeline import source_scope
 
     fill_good(proj)
-    optional = proj / "node_modules" / ".pnpm" / "chokidar" / "node_modules" / "fsevents"
+    optional = (
+        proj / "node_modules" / ".pnpm" / "chokidar" / "node_modules" / "fsevents"
+    )
     optional.mkdir(parents=True)
     (optional / "optional.py").write_text("def hidden():\n    return eval('1')\n")
     generated = proj / ".factory" / "retained-clones" / "snapshot"
@@ -1089,17 +1323,27 @@ def test_qa_prunes_dependency_and_factory_generated_trees(proj, monkeypatch):
     report = qa_audit(proj)
     assert report.security_score == 100
     assert report.metrics["inventory_complete"] is True
-    assert all(not path.startswith(("node_modules/", ".factory/", "ignored.factory/")) for path in report.scope["code_files"])
+    assert all(
+        not path.startswith(("node_modules/", ".factory/", "ignored.factory/"))
+        for path in report.scope["code_files"]
+    )
     assert visited.count(".") == 1
-    assert not any(path == ".factory" or path.startswith(".factory/") for path in visited)
-    assert not any(path == "ignored.factory" or path.startswith("ignored.factory/") for path in visited)
+    assert not any(
+        path == ".factory" or path.startswith(".factory/") for path in visited
+    )
+    assert not any(
+        path == "ignored.factory" or path.startswith("ignored.factory/")
+        for path in visited
+    )
 
 
 def test_qa_fails_closed_when_inventory_walk_is_incomplete(proj, monkeypatch):
     from forgeline.gates.qa_audit import qa_audit
     from forgeline import source_scope
 
-    (proj / "safe.py").write_text('def safe():\n    """Safe function."""\n    return True\n', encoding="utf-8")
+    (proj / "safe.py").write_text(
+        'def safe():\n    """Safe function."""\n    return True\n', encoding="utf-8"
+    )
 
     def incomplete_walk(root, *, topdown, onerror, followlinks):
         yield str(root), [], ["safe.py"]
@@ -1109,7 +1353,10 @@ def test_qa_fails_closed_when_inventory_walk_is_incomplete(proj, monkeypatch):
     report = qa_audit(proj)
 
     assert report.metrics["inventory_complete"] is False
-    assert any(finding.startswith("QA_SOURCE_INVENTORY_INCOMPLETE") for finding in report.findings)
+    assert any(
+        finding.startswith("QA_SOURCE_INVENTORY_INCOMPLETE")
+        for finding in report.findings
+    )
     assert report.grade == "F"
     assert report.passed is False
 
@@ -1119,7 +1366,7 @@ def test_qa_records_source_read_failure_as_incomplete(proj, monkeypatch):
     from forgeline.gates.qa_audit import qa_audit
 
     target = proj / "unreadable.py"
-    target.write_text('def hidden():\n    return True\n', encoding="utf-8")
+    target.write_text("def hidden():\n    return True\n", encoding="utf-8")
     (proj / "unsupported.rb").write_text("def hidden; true; end\n", encoding="utf-8")
     read_text = source_scope.Path.read_text
 
@@ -1133,8 +1380,14 @@ def test_qa_records_source_read_failure_as_incomplete(proj, monkeypatch):
     unsupported = source_scope.analyze_source(proj / "unsupported.rb", proj)
 
     assert report.metrics["inventory_complete"] is False
-    assert any(finding.startswith("QA_SOURCE_READ_ERROR unreadable.py:") for finding in report.findings)
-    assert any(finding.startswith("QA_SOURCE_INVENTORY_INCOMPLETE") for finding in report.findings)
+    assert any(
+        finding.startswith("QA_SOURCE_READ_ERROR unreadable.py:")
+        for finding in report.findings
+    )
+    assert any(
+        finding.startswith("QA_SOURCE_INVENTORY_INCOMPLETE")
+        for finding in report.findings
+    )
     assert report.grade == "F"
     assert report.passed is False
     assert unsupported["status"] == "parser_unsupported"
@@ -1146,7 +1399,10 @@ def test_qa_explicit_factory_path_still_uses_repo_tests(proj):
 
     feature = proj / ".factory" / "explicit_feature.py"
     feature.parent.mkdir(parents=True)
-    feature.write_text('def run(value):\n    """Return the supplied value."""\n    return value\n', encoding="utf-8")
+    feature.write_text(
+        'def run(value):\n    """Return the supplied value."""\n    return value\n',
+        encoding="utf-8",
+    )
     tests = proj / "tests" / "test_explicit_feature.py"
     tests.parent.mkdir()
     tests.write_text("def test_run():\n    assert run('x') == 'x'\n", encoding="utf-8")
@@ -1175,14 +1431,20 @@ def test_qa_feature_slice_ignores_unrelated_python_and_never_python_parses_mjs(p
     assert not any("bad.py" in finding for finding in report.findings)
 
 
-def test_mjs_qa_measures_only_exported_symbols_with_measured_coverage(proj, monkeypatch):
+def test_mjs_qa_measures_only_exported_symbols_with_measured_coverage(
+    proj, monkeypatch
+):
     from forgeline import source_scope
     from forgeline.gates.qa_audit import qa_audit
 
     node = shutil.which("node")
-    compiler = source_scope._typescript_module_path(node, Path(__file__).resolve().parents[1])
+    compiler = source_scope._typescript_module_path(
+        node, Path(__file__).resolve().parents[1]
+    )
     assert node and compiler
-    monkeypatch.setattr(source_scope, "_typescript_module_path", lambda _node, _root: compiler)
+    monkeypatch.setattr(
+        source_scope, "_typescript_module_path", lambda _node, _root: compiler
+    )
 
     feature = proj / "services" / "memory.mjs"
     feature.parent.mkdir()
@@ -1193,7 +1455,10 @@ def test_mjs_qa_measures_only_exported_symbols_with_measured_coverage(proj, monk
         encoding="utf-8",
     )
     tests = proj / "services" / "memory.test.mjs"
-    tests.write_text("import { recall } from './memory.mjs';\nrecall('x'); normalize?.(' x ');\n", encoding="utf-8")
+    tests.write_text(
+        "import { recall } from './memory.mjs';\nrecall('x'); normalize?.(' x ');\n",
+        encoding="utf-8",
+    )
 
     report = qa_audit(proj, source_paths=[feature])
     names = {metric["function"].split(":")[-1] for metric in report.function_metrics}
@@ -1201,7 +1466,10 @@ def test_mjs_qa_measures_only_exported_symbols_with_measured_coverage(proj, monk
     assert report.coverage_intent is not None and report.coverage_intent > 0
     assert report.metrics["coverage_assessment"] == "static_name_match"
     assert report.metrics["behavioral_proof_status"] == "not_measured_static_only"
-    assert not any("PARSER_UNSUPPORTED" in finding or "QA_SYNTAX" in finding for finding in report.findings)
+    assert not any(
+        "PARSER_UNSUPPORTED" in finding or "QA_SYNTAX" in finding
+        for finding in report.findings
+    )
 
 
 def test_typescript_qa_excludes_callbacks_and_local_helpers(proj, monkeypatch):
@@ -1209,9 +1477,13 @@ def test_typescript_qa_excludes_callbacks_and_local_helpers(proj, monkeypatch):
     from forgeline.gates.qa_audit import qa_audit
 
     node = shutil.which("node")
-    compiler = source_scope._typescript_module_path(node, Path(__file__).resolve().parents[1])
+    compiler = source_scope._typescript_module_path(
+        node, Path(__file__).resolve().parents[1]
+    )
     assert node and compiler
-    monkeypatch.setattr(source_scope, "_typescript_module_path", lambda _node, _root: compiler)
+    monkeypatch.setattr(
+        source_scope, "_typescript_module_path", lambda _node, _root: compiler
+    )
 
     feature = proj / "services" / "public-surface.ts"
     feature.parent.mkdir()
@@ -1224,12 +1496,232 @@ def test_typescript_qa_excludes_callbacks_and_local_helpers(proj, monkeypatch):
         encoding="utf-8",
     )
     tests = proj / "services" / "public-surface.test.ts"
-    tests.write_text("import { decide, run } from './public-surface'; decide([]); run('x');\n", encoding="utf-8")
+    tests.write_text(
+        "import { decide, run } from './public-surface'; decide([]); run('x');\n",
+        encoding="utf-8",
+    )
 
     report = qa_audit(proj, source_paths=[feature])
     names = {metric["function"].split(":")[-1] for metric in report.function_metrics}
     assert names == {"decide", "run"}
     assert report.coverage_intent == 1.0
+
+
+def test_cloudflare_sql_exec_exception_requires_bound_static_ast_proof(
+    proj, monkeypatch
+):
+    from forgeline import source_scope
+    from forgeline.gates.qa_audit import qa_audit
+
+    node = shutil.which("node")
+    compiler = source_scope._typescript_module_path(
+        node, Path(__file__).resolve().parents[1]
+    )
+    assert node and compiler
+    monkeypatch.setattr(
+        source_scope, "_typescript_module_path", lambda _node, _root: compiler
+    )
+    feature = proj / "services" / "counter.ts"
+    feature.parent.mkdir()
+    feature.write_text(
+        'import { DurableObject as BaseDO } from "cloudflare:workers";\n'
+        "export class Counter extends BaseDO {\n"
+        '  constructor(ctx: any, env: any) { super(ctx, env); this.ctx.blockConcurrencyWhile(async () => { this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS counters (id TEXT)"); }); }\n'
+        '  find(id: string) { const note = "🧪"; return this.ctx.storage.sql.exec("SELECT value FROM counters WHERE id = ?", id); }\\n'
+        "}\n",
+        encoding="utf-8",
+    )
+
+    report = qa_audit(proj, source_paths=[feature])
+    assert report.security_score == 100
+    assert not any(item.startswith("QA_SEC") for item in report.findings)
+    assert report.metrics["unknown_security_calls"] == []
+
+    feature.write_text(
+        'import { DurableObject as BaseDO } from "cloudflare:workers";\n'
+        "export class Counter extends BaseDO {\n"
+        "  find(query: string) { return this.ctx.storage.sql.exec(query); }\n"
+        '  spread(values: unknown[]) { return this.ctx.storage.sql.exec("SELECT ?", ...values); }\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    report = qa_audit(proj, source_paths=[feature])
+    assert any("exec() - arbitrary code execution" in item for item in report.findings)
+    assert any(
+        "dynamic or spread SQL argument" in item
+        for item in report.metrics["unknown_security_calls"]
+    )
+
+
+def test_cloudflare_sql_exec_does_not_hide_unproven_or_nested_dangerous_calls(
+    proj, monkeypatch
+):
+    from forgeline import source_scope
+    from forgeline.gates.qa_audit import qa_audit
+
+    node = shutil.which("node")
+    compiler = source_scope._typescript_module_path(
+        node, Path(__file__).resolve().parents[1]
+    )
+    assert node and compiler
+    monkeypatch.setattr(
+        source_scope, "_typescript_module_path", lambda _node, _root: compiler
+    )
+    feature = proj / "services" / "unsafe-sql.ts"
+    feature.parent.mkdir()
+    feature.write_text(
+        'import { DurableObject } from "cloudflare:workers";\n'
+        "export class Counter extends DurableObject {\n"
+        '  changed() { this.ctx = {} as never; return this.ctx.storage.sql.exec("SELECT 1"); }\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    assert source_scope.analyze_source(feature, proj)["safe_sql_exec_spans"] == []
+    computed_and_destructured_writes = (
+        'import { DurableObject } from "cloudflare:workers";\n'
+        'class Computed extends DurableObject { run(key: string) { this[key] = {}; return this.ctx.storage.sql.exec("SELECT 1"); } }\n'
+        'class ComputedCtx extends DurableObject { run() { this["ctx"] = {}; return this.ctx.storage.sql.exec("SELECT 1"); } }\n'
+        'class Destructured extends DurableObject { run() { ({ctx: this.ctx} = {} as any); return this.ctx.storage.sql.exec("SELECT 1"); } }\n'
+        'class CtxField extends DurableObject { ctx = {}; run() { return this.ctx.storage.sql.exec("SELECT 1"); } }\n'
+        'class CtxStringField extends DurableObject { "ctx" = {}; run() { return this.ctx.storage.sql.exec("SELECT 1"); } }\n'
+        'class CtxMethod extends DurableObject { ctx() {} run() { return this.ctx.storage.sql.exec("SELECT 1"); } }\n'
+        'class CtxGetter extends DurableObject { get ctx() { return {}; } run() { return this.ctx.storage.sql.exec("SELECT 1"); } }\n'
+        'class CtxSetter extends DurableObject { set ctx(value: any) {} run() { return this.ctx.storage.sql.exec("SELECT 1"); } }\n'
+        'class Define extends DurableObject { run() { Object.defineProperty(this, "ctx", {value: {}}); return this.ctx.storage.sql.exec("SELECT 1"); } }\n'
+        'class NestedPath extends DurableObject { run() { this.ctx.storage["sql"] = {}; return this.ctx.storage.sql.exec("SELECT 1"); } }\n'
+        'class ComputedField extends DurableObject { ["ctx"] = {}; run() { return this.ctx.storage.sql.exec("SELECT 1"); } }\n'
+        'class ComputedGetter extends DurableObject { get ["ctx"]() { return {}; } run() { return this.ctx.storage.sql.exec("SELECT 1"); } }\n'
+        'class MutatedCapture extends DurableObject { constructor(ctx: any, env: any) { super(ctx, env); this.ctx = ctx; Object.assign(this.ctx, {storage: {}}); } run() { return this.ctx.storage.sql.exec("SELECT 1"); } }\n'
+    )
+    feature.write_text(computed_and_destructured_writes, encoding="utf-8")
+    assert source_scope.analyze_source(feature, proj)["safe_sql_exec_spans"] == []
+    feature.write_text(
+        'import { DurableObject } from "cloudflare:workers";\n'
+        'class Rebound extends DurableObject { constructor(ctx: any, env: any) { super(ctx, env); this.ctx = ctx; ctx.storage.sql.exec("SELECT 1"); } }\n',
+        encoding="utf-8",
+    )
+    assert source_scope.analyze_source(feature, proj)["safe_sql_exec_spans"] == []
+    feature.write_text(
+        'import { DurableObject } from "cloudflare:workers";\n'
+        'class Shadowed extends DurableObject { run(ctx: any) { return ctx.storage.sql.exec("SELECT 1"); } }\n',
+        encoding="utf-8",
+    )
+    assert source_scope.analyze_source(feature, proj)["safe_sql_exec_spans"] == []
+
+    feature.write_text(
+        'import { DurableObject } from "cloudflare:workers";\n'
+        'import * as child_process from "node:child_process";\n'
+        "export class Counter extends DurableObject {\n"
+        '  shadowed() { const ctx = this.ctx; return ctx.storage.sql.exec("SELECT 1"); }\n'
+        '  nested(value: string) { return this.ctx.storage.sql.exec("SELECT ?", eval(value)); }\n'
+        "  process(value: string) { child_process.exec(value); }\n"
+        "  bare(value: string) { exec(value); }\n"
+        "}\n"
+        'class ChangedCounter extends DurableObject { changed() { this.ctx = {} as never; return this.ctx.storage.sql.exec("SELECT 1"); } }\n'
+        'class FakeDO { run() { this.ctx.storage.sql.exec("SELECT 1"); } }\n'
+        'function nestedShadow(DurableObject: any) { class Nested extends DurableObject { run() { return this.ctx.storage.sql.exec("SELECT 1"); } } }\n',
+        encoding="utf-8",
+    )
+
+    parsed = source_scope.analyze_source(feature, proj)
+    assert len(parsed["safe_sql_exec_spans"]) == 1
+    report = qa_audit(proj, source_paths=[feature])
+    security = [item for item in report.findings if item.startswith("QA_SEC")]
+    assert any("exec() - arbitrary code execution" in item for item in security)
+    assert any("eval() - arbitrary code execution" in item for item in security)
+    assert report.security_score < 100
+
+
+def test_typescript_security_spans_fail_closed_when_source_changes_during_parse(
+    proj, monkeypatch
+):
+    from forgeline import source_scope
+    from forgeline.gates.qa_audit import qa_audit
+
+    node = shutil.which("node")
+    compiler = source_scope._typescript_module_path(
+        node, Path(__file__).resolve().parents[1]
+    )
+    assert node and compiler
+    monkeypatch.setattr(
+        source_scope, "_typescript_module_path", lambda _node, _root: compiler
+    )
+    feature = proj / "services" / "changed-during-parse.ts"
+    feature.parent.mkdir()
+    feature.write_text(
+        'import { DurableObject } from "cloudflare:workers";\n'
+        'class Counter extends DurableObject { run() { return this.ctx.storage.sql.exec("SELECT 1"); } }\n',
+        encoding="utf-8",
+    )
+    parse_source = source_scope._typescript_compiler_parse
+
+    def change_file_between_python_and_node_reads(
+        node_path, source_path, root, *, language="typescript"
+    ):
+        source_path.write_text(
+            'import { DurableObject } from "cloudflare:workers";\n'
+            "class Counter extends DurableObject { run(query: string) { return this.ctx.storage.sql.exec(query); } }\n",
+            encoding="utf-8",
+        )
+        return parse_source(node_path, source_path, root, language=language)
+
+    monkeypatch.setattr(
+        source_scope,
+        "_typescript_compiler_parse",
+        change_file_between_python_and_node_reads,
+    )
+
+    report = qa_audit(proj, source_paths=[feature])
+    assert any(
+        item.startswith("QA_PARSER_UNSUPPORTED services/changed-during-parse.ts:")
+        for item in report.findings
+    )
+    assert report.grade == "F"
+    assert not report.passed
+
+
+def test_cloudflare_sql_exec_spans_survive_crlf_and_mixed_newlines(proj, monkeypatch):
+    from forgeline import source_scope
+    from forgeline.gates.qa_audit import qa_audit
+
+    node = shutil.which("node")
+    compiler = source_scope._typescript_module_path(
+        node, Path(__file__).resolve().parents[1]
+    )
+    assert node and compiler
+    monkeypatch.setattr(
+        source_scope, "_typescript_module_path", lambda _node, _root: compiler
+    )
+    feature = proj / "services" / "line-endings.ts"
+    feature.parent.mkdir()
+
+    cases = (
+        (
+            feature,
+            'import { DurableObject } from "cloudflare:workers";\n'
+            "class Counter extends DurableObject {\n"
+            '  run() { return this.ctx.storage.sql.exec("SELECT 1"); }\n'
+            "}\n",
+            "\r\n",
+        ),
+        (
+            proj / "services" / "line-endings.mjs",
+            'import { DurableObject } from "cloudflare:workers";\r\n'
+            "class Counter extends DurableObject {\n"
+            '  run() { const note = "🧪"; return this.ctx.storage.sql.exec("SELECT 1"); }\r'
+            "}\n",
+            None,
+        ),
+    )
+    for target, source, newline in cases:
+        if target.parent != feature.parent:
+            target.parent.mkdir(parents=True)
+        raw_source = source.replace("\n", newline) if newline else source
+        target.write_bytes(raw_source.encode("utf-8"))
+        report = qa_audit(proj, source_paths=[target])
+        assert report.security_score == 100
+        assert not any(item.startswith("QA_SEC") for item in report.findings)
+        assert report.metrics["unknown_security_calls"] == []
 
 
 def test_python_qa_excludes_nested_and_private_symbols(proj):
@@ -1238,18 +1730,21 @@ def test_python_qa_excludes_nested_and_private_symbols(proj):
     feature = proj / "services" / "public_surface.py"
     feature.parent.mkdir()
     feature.write_text(
-        'def decide(value):\n'
+        "def decide(value):\n"
         '    """Public function."""\n'
-        '    def nested():\n'
-        '        return value\n'
-        '    return nested()\n\n'
-        'def _helper(value):\n'
-        '    return value\n',
+        "    def nested():\n"
+        "        return value\n"
+        "    return nested()\n\n"
+        "def _helper(value):\n"
+        "    return value\n",
         encoding="utf-8",
     )
     tests = proj / "tests" / "test_public_surface.py"
     tests.parent.mkdir()
-    tests.write_text("from services.public_surface import decide\ndef test_decide(): assert decide('x') == 'x'\n", encoding="utf-8")
+    tests.write_text(
+        "from services.public_surface import decide\ndef test_decide(): assert decide('x') == 'x'\n",
+        encoding="utf-8",
+    )
 
     report = qa_audit(proj, source_paths=[feature])
     names = {metric["function"].split(":")[-1] for metric in report.function_metrics}
@@ -1274,15 +1769,19 @@ def test_qa_complexity_threshold_is_hard_and_cannot_pass_with_grade_b(proj):
     target = proj / "slices" / "complexity.py"
     target.parent.mkdir()
     target.write_text(
-        'def too_complex(x):\n'
+        "def too_complex(x):\n"
         '    """A deliberately complex feature."""\n'
-        + "".join(f"    if x == {index}:\n        return {index}\n" for index in range(12))
+        + "".join(
+            f"    if x == {index}:\n        return {index}\n" for index in range(12)
+        )
         + "    return -1\n",
         encoding="utf-8",
     )
     tests = proj / "tests" / "test_complexity.py"
     tests.parent.mkdir()
-    tests.write_text("from slices.complexity import too_complex\ndef test_it(): assert too_complex(1) == 1\n")
+    tests.write_text(
+        "from slices.complexity import too_complex\ndef test_it(): assert too_complex(1) == 1\n"
+    )
 
     report = qa_audit(proj, source_paths=[target])
     assert report.max_complexity > 10
@@ -1294,19 +1793,32 @@ def test_qa_complexity_threshold_is_hard_and_cannot_pass_with_grade_b(proj):
 def test_invariant_regex_requires_a_bounded_symbol_scope(proj):
     spec = {
         "name": "scoped-invariant",
-        "modules": [{"name": "sample", "path": "src/sample.py", "functions": [{"name": "target", "args": [], "returns": "str"}]}],
+        "modules": [
+            {
+                "name": "sample",
+                "path": "src/sample.py",
+                "functions": [{"name": "target", "args": [], "returns": "str"}],
+            }
+        ],
         "dependencies": [],
-        "invariants": [{
-            "name": "no_eval_in_target", "forbid_pattern": "\\beval\\(",
-            "scopes": [{"module": "sample", "symbol": "target", "max_lines": 20}],
-        }],
+        "invariants": [
+            {
+                "name": "no_eval_in_target",
+                "forbid_pattern": "\\beval\\(",
+                "scopes": [{"module": "sample", "symbol": "target", "max_lines": 20}],
+            }
+        ],
     }
     target = proj / "src" / "sample.py"
     target.parent.mkdir()
-    target.write_text("def target():\n    return 'ok'\n\ndef unrelated():\n    return eval('1')\n")
+    target.write_text(
+        "def target():\n    return 'ok'\n\ndef unrelated():\n    return eval('1')\n"
+    )
     assert not any(item.code == "E_INVARIANT" for item in check_erosion(spec, proj))
 
-    target.write_text("def target():\n    return eval('1')\n\ndef unrelated():\n    return 'ok'\n")
+    target.write_text(
+        "def target():\n    return eval('1')\n\ndef unrelated():\n    return 'ok'\n"
+    )
     assert any(item.code == "E_INVARIANT" for item in check_erosion(spec, proj))
 
     spec["invariants"][0].pop("scopes")
@@ -1320,7 +1832,7 @@ def test_fill_attributes_invariant_not_stub(proj):
     fill_good(proj)
     formatter = proj / "slices" / "notifier" / "formatter.py"
     formatter.write_text(
-        'def format_message(event: dict) -> str:\n'
+        "def format_message(event: dict) -> str:\n"
         '    """Render an event."""\n'
         "    return str(eval('1'))\n"
     )
@@ -1340,25 +1852,40 @@ def test_cli_requires_feature_scope_and_reports_machine_provenance(proj, capsys)
 
     main(["version", "--json"])
     provenance = json.loads(capsys.readouterr().out)
+    from forgeline import __version__
+
     assert provenance["package"] == "code-factory-2-forge"
-    assert provenance["version"] == "0.10.8"
-    assert {"source_commit", "build_hash", "install_origin", "python"} <= provenance.keys()
+    assert provenance["version"] == __version__
+    assert {
+        "source_commit",
+        "build_hash",
+        "install_origin",
+        "python",
+    } <= provenance.keys()
+
 
 def test_learning_kernel_promotes_recurring_lessons(proj):
     from forgeline.learning import LearningKernel
     from forgeline.skill_memory import record_lesson, lessons_for
+
     for _ in range(3):
-        record_lesson(proj, phase="fill", failure_code="A_EVAL", fix="never eval", feature="x")
+        record_lesson(
+            proj, phase="fill", failure_code="A_EVAL", fix="never eval", feature="x"
+        )
     k = LearningKernel(proj, promote_threshold=3)
     promoted = k.promote(lessons_for(proj, "fill"))
     assert "A_EVAL" in promoted
     assert "A_EVAL" in k.active_codes()
 
+
 def test_learning_kernel_measures_effectiveness(proj):
     from forgeline.learning import LearningKernel
     from forgeline.skill_memory import record_lesson, lessons_for
+
     for _ in range(3):
-        record_lesson(proj, phase="fill", failure_code="A_EVAL", fix="no eval", feature="x")
+        record_lesson(
+            proj, phase="fill", failure_code="A_EVAL", fix="no eval", feature="x"
+        )
     k = LearningKernel(proj, promote_threshold=3)
     k.promote(lessons_for(proj, "fill"))
     # the constraint fires again (caught the same failure) => validated
@@ -1367,9 +1894,11 @@ def test_learning_kernel_measures_effectiveness(proj):
     summary = k.policy_summary()
     assert summary["constraints"]["A_EVAL"]["prevented"] >= 1
 
+
 def test_learning_kernel_puts_dead_rules_on_probation(proj):
     from forgeline.learning import LearningKernel
     from forgeline.skill_memory import record_lesson, lessons_for
+
     for _ in range(3):
         record_lesson(proj, phase="fill", failure_code="A_STALE", fix="x", feature="x")
     k = LearningKernel(proj, promote_threshold=3)
@@ -1378,51 +1907,89 @@ def test_learning_kernel_puts_dead_rules_on_probation(proj):
     eff = k.audit_effectiveness()
     assert "A_STALE" in eff["probation"]
 
+
 def test_review_escalates_and_promotes(proj):
     from forgeline.orchestrator import Orchestrator
     from forgeline.states import State
+
     o = Orchestrator(proj, "notifier")
     o.store.set_state(State.ARCHITECTED)
-    o.architect(proj/"notifier.ssat.yaml")
+    o.architect(proj / "notifier.ssat.yaml")
     o.store.set_state(State.FILLED)  # stubs unfilled -> repeated failures
-    r1 = o.review(proj/"notifier.ssat.yaml")
+    r1 = o.review(proj / "notifier.ssat.yaml")
     assert r1["reviewed"] is False and "escalation" in r1
     assert r1["escalation"].startswith("normal")
-    r2 = o.review(proj/"notifier.ssat.yaml")
+    r2 = o.review(proj / "notifier.ssat.yaml")
     assert "elevated" in r2["escalation"]  # loop gets stricter
+
 
 def test_review_receipt_carries_qa_grade(proj):
     from forgeline.orchestrator import Orchestrator
     from forgeline.states import State
     import json
+
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.ARCHITECTED); o.architect(proj/"notifier.ssat.yaml")
-    fill_good(proj); o.store.set_state(State.FILLED)
-    o.review(proj/"notifier.ssat.yaml")
-    receipts = [json.loads(l) for l in (proj/".forge"/"notifier"/"receipts.jsonl").read_text().splitlines()]
-    review_r = [r for r in receipts if r.get("phase")=="review"]
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    fill_good(proj)
+    o.store.set_state(State.FILLED)
+    o.review(proj / "notifier.ssat.yaml")
+    receipts = [
+        json.loads(line)
+        for line in (proj / ".forge" / "notifier" / "receipts.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    review_r = [r for r in receipts if r.get("phase") == "review"]
     assert review_r and "qa_grade" in review_r[0] and "qa_metrics" in review_r[0]
     assert review_r[0]["attribution"]["n_checked"] == 4
 
 
-@pytest.mark.parametrize("profile", ["requirements", "implementation", "test_evidence", "repair"])
+@pytest.mark.parametrize(
+    "profile", ["requirements", "implementation", "test_evidence", "repair"]
+)
 def test_jev_review_packet_is_explicit_and_advisory(proj, profile):
-    fill_good(proj); (proj / "evidence.txt").write_text("operator evidence", encoding="utf-8")
-    material = {"profile": profile, "criteria": [{"id": "c1", "statement": "criterion met", "evidence_ids": ["e1"]}],
-                "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "operator_artifact"}], "omissions": []}
-    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    fill_good(proj)
+    (proj / "evidence.txt").write_text("operator evidence", encoding="utf-8")
+    material = {
+        "profile": profile,
+        "criteria": [
+            {"id": "c1", "statement": "criterion met", "evidence_ids": ["e1"]}
+        ],
+        "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "operator_artifact"}],
+        "omissions": [],
+    }
+    o = Orchestrator(proj, "notifier")
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    o.store.set_state(State.FILLED)
     seen = []
-    result = o.review(proj / "notifier.ssat.yaml", material=material,
-                      reviewer=lambda packet: seen.append(packet) or {"status": "ADVISORY", "authority": "none", "release_decision": False})
-    context = next(row for row in seen[0]["evidence"] if row["kind"] == "forgeline_context")
-    assert context["provenance"]["profile"] == profile and seen[0]["claims"][0]["id"] == "c1"
+    result = o.review(
+        proj / "notifier.ssat.yaml",
+        material=material,
+        reviewer=lambda packet: seen.append(packet)
+        or {"status": "ADVISORY", "authority": "none", "release_decision": False},
+    )
+    context = next(
+        row for row in seen[0]["evidence"] if row["kind"] == "forgeline_context"
+    )
+    assert (
+        context["provenance"]["profile"] == profile
+        and seen[0]["claims"][0]["id"] == "c1"
+    )
     assert result["reviewed"] is True and result["jev_review"]["authority"] == "none"
     receipt = o.store.latest_receipt("jev_review", strict=True)
-    assert receipt["usage"] is None and receipt["cost"] is None and receipt["latency"] is None
+    assert (
+        receipt["usage"] is None
+        and receipt["cost"] is None
+        and receipt["latency"] is None
+    )
 
 
 @pytest.mark.parametrize("availability", ["missing-module", "missing-api"])
-def test_jev_optional_adapter_absence_stays_advisory_without_weakening_review(proj, monkeypatch, availability):
+def test_jev_optional_adapter_absence_stays_advisory_without_weakening_review(
+    proj, monkeypatch, availability
+):
     import sys
     from types import ModuleType
 
@@ -1432,41 +1999,76 @@ def test_jev_optional_adapter_absence_stays_advisory_without_weakening_review(pr
     o.store.set_state(State.ARCHITECTED)
     o.architect(proj / "notifier.ssat.yaml")
     o.store.set_state(State.FILLED)
-    unavailable = None if availability == "missing-module" else ModuleType("factoryline.jev_classifier")
+    unavailable = (
+        None
+        if availability == "missing-module"
+        else ModuleType("factoryline.jev_classifier")
+    )
     monkeypatch.setitem(sys.modules, "factoryline.jev_classifier", unavailable)
     monkeypatch.setitem(sys.modules, "factoryline.analysis_evidence", None)
 
-    result = o.review(proj / "notifier.ssat.yaml", material={
-        "profile": "implementation",
-        "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
-        "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "operator_artifact"}],
-        "omissions": ["adapter unavailable"],
-    })
+    result = o.review(
+        proj / "notifier.ssat.yaml",
+        material={
+            "profile": "implementation",
+            "criteria": [
+                {"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}
+            ],
+            "evidence": [
+                {"id": "e1", "path": "evidence.txt", "kind": "operator_artifact"}
+            ],
+            "omissions": ["adapter unavailable"],
+        },
+    )
 
     assert result["reviewed"] is True
     assert result["jev_review"]["status"] == "FALLBACK"
     assert result["jev_review"]["authority"] == "none"
     assert result["jev_review"]["release_decision"] is False
     assert result["jev_packet"]["schema"] == "factory.review-evidence.v1"
-    core = {key: value for key, value in result["jev_packet"].items() if key != "packet_sha256"}
-    assert result["jev_packet"]["packet_sha256"] == hashlib.sha256(
-        json.dumps(core, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    core = {
+        key: value
+        for key, value in result["jev_packet"].items()
+        if key != "packet_sha256"
+    }
+    assert (
+        result["jev_packet"]["packet_sha256"]
+        == hashlib.sha256(
+            json.dumps(core, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
 
 
 def test_jev_stale_source_and_invalid_profile_fail_closed(proj):
-    fill_good(proj); (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
-    material = {"profile": "implementation", "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
-                "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}
-    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    fill_good(proj)
+    (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
+    material = {
+        "profile": "implementation",
+        "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
+        "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}],
+        "omissions": [],
+    }
+    o = Orchestrator(proj, "notifier")
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    o.store.set_state(State.FILLED)
     src = proj / "slices/notifier/formatter.py"
+
     def mutate(packet):
         src.write_text("changed", encoding="utf-8")
         return {"status": "ADVISORY", "authority": "none", "release_decision": False}
+
     result = o.review(proj / "notifier.ssat.yaml", material=material, reviewer=mutate)
-    assert result["reviewed"] is True and result["jev_review"]["status"] == "JEV_REVIEW_STALE"
+    assert (
+        result["reviewed"] is True
+        and result["jev_review"]["status"] == "JEV_REVIEW_STALE"
+    )
     calls = []
-    result = o.review(proj / "notifier.ssat.yaml", material={"profile": "bad"}, reviewer=lambda packet: calls.append(packet))
+    result = o.review(
+        proj / "notifier.ssat.yaml",
+        material={"profile": "bad"},
+        reviewer=lambda packet: calls.append(packet),
+    )
     assert result["jev_review"]["status"] == "FORGE_CONTEXT_INVALID" and not calls
 
 
@@ -1479,8 +2081,11 @@ def test_jev_non_object_material_records_deterministic_failure(proj, material):
     o.store.set_state(State.FILLED)
     calls = []
 
-    result = o.review(proj / "notifier.ssat.yaml", material=material,
-                      reviewer=lambda packet: calls.append(packet))
+    result = o.review(
+        proj / "notifier.ssat.yaml",
+        material=material,
+        reviewer=lambda packet: calls.append(packet),
+    )
 
     assert result["reviewed"] is True
     assert result["jev_review"]["status"] == "FORGE_CONTEXT_INVALID"
@@ -1489,24 +2094,37 @@ def test_jev_non_object_material_records_deterministic_failure(proj, material):
     assert o.store.latest_receipt("review", strict=True)["attempt"] == 1
 
 
-@pytest.mark.parametrize("invalid_material", [
-    {
-        "profile": "implementation",
-        "criteria": [
-            {"id": "c1", "statement": "first", "evidence_ids": ["e1"]},
-            {"id": "c1", "statement": "duplicate", "evidence_ids": ["e1"]},
-        ],
-        "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}],
-        "omissions": [],
-    },
-    {
-        "profile": "implementation",
-        "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["forgeline-context"]}],
-        "evidence": [{"id": "forgeline-context", "path": "evidence.txt", "kind": "artifact"}],
-        "omissions": [],
-    },
-])
-def test_jev_duplicate_claim_ids_and_reserved_context_evidence_fail_before_reviewer(proj, invalid_material):
+@pytest.mark.parametrize(
+    "invalid_material",
+    [
+        {
+            "profile": "implementation",
+            "criteria": [
+                {"id": "c1", "statement": "first", "evidence_ids": ["e1"]},
+                {"id": "c1", "statement": "duplicate", "evidence_ids": ["e1"]},
+            ],
+            "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}],
+            "omissions": [],
+        },
+        {
+            "profile": "implementation",
+            "criteria": [
+                {
+                    "id": "c1",
+                    "statement": "criterion",
+                    "evidence_ids": ["forgeline-context"],
+                }
+            ],
+            "evidence": [
+                {"id": "forgeline-context", "path": "evidence.txt", "kind": "artifact"}
+            ],
+            "omissions": [],
+        },
+    ],
+)
+def test_jev_duplicate_claim_ids_and_reserved_context_evidence_fail_before_reviewer(
+    proj, invalid_material
+):
     fill_good(proj)
     (proj / "evidence.txt").write_text("observed evidence", encoding="utf-8")
     o = Orchestrator(proj, "notifier")
@@ -1515,8 +2133,11 @@ def test_jev_duplicate_claim_ids_and_reserved_context_evidence_fail_before_revie
     o.store.set_state(State.FILLED)
     calls = []
 
-    result = o.review(proj / "notifier.ssat.yaml", material=invalid_material,
-                      reviewer=lambda packet: calls.append(packet))
+    result = o.review(
+        proj / "notifier.ssat.yaml",
+        material=invalid_material,
+        reviewer=lambda packet: calls.append(packet),
+    )
 
     assert result["reviewed"] is True
     assert result["jev_review"]["status"] == "FORGE_CONTEXT_INVALID"
@@ -1524,70 +2145,164 @@ def test_jev_duplicate_claim_ids_and_reserved_context_evidence_fail_before_revie
     assert calls == []
 
 
-@pytest.mark.parametrize("profile", ["requirements", "implementation", "test_evidence", "repair"])
+@pytest.mark.parametrize(
+    "profile", ["requirements", "implementation", "test_evidence", "repair"]
+)
 def test_jev_shared_adapter_roundtrip(proj, profile):
-    classifier = pytest.importorskip("factoryline.jev_classifier", reason="optional FactoryLine adapter is not installed")
+    classifier = pytest.importorskip(
+        "factoryline.jev_classifier",
+        reason="optional FactoryLine adapter is not installed",
+    )
     if not hasattr(classifier, "review_forgeline_packet"):
         pytest.skip("installed FactoryLine has no review_forgeline_packet API")
-    fill_good(proj); (proj / "evidence.txt").write_text("observed evidence", encoding="utf-8")
-    material = {"profile": profile, "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
-                "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}
-    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    fill_good(proj)
+    (proj / "evidence.txt").write_text("observed evidence", encoding="utf-8")
+    material = {
+        "profile": profile,
+        "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
+        "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}],
+        "omissions": [],
+    }
+    o = Orchestrator(proj, "notifier")
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    o.store.set_state(State.FILLED)
+
     def reviewer(packet):
         def transport(request):
-            return {"context_sha256": request["context_sha256"], "claims": [{"claim_id": "c1", "label": "INSUFFICIENT_EVIDENCE",
-                "supporting_evidence_ids": [], "contradicting_evidence_ids": [], "rationale": "Evidence is insufficient.",
-                "verification_action": "Collect additional evidence."}]}
+            return {
+                "context_sha256": request["context_sha256"],
+                "claims": [
+                    {
+                        "claim_id": "c1",
+                        "label": "INSUFFICIENT_EVIDENCE",
+                        "supporting_evidence_ids": [],
+                        "contradicting_evidence_ids": [],
+                        "rationale": "Evidence is insufficient.",
+                        "verification_action": "Collect additional evidence.",
+                        "contextual_evidence": [],
+                    }
+                ],
+            }
+
         return classifier.review_forgeline_packet(packet, transport=transport)
+
     result = o.review(proj / "notifier.ssat.yaml", material=material, reviewer=reviewer)
     assert result["reviewed"] is True and result["jev_review"]["status"] == "ADVISORY"
-    assert result["jev_review"]["authority"] == "none" and result["jev_review"]["release_decision"] is False
+    assert (
+        result["jev_review"]["authority"] == "none"
+        and result["jev_review"]["release_decision"] is False
+    )
 
 
-@pytest.mark.parametrize("transport,expected", [(None, "FALLBACK"), (lambda request: {}, "JEV_REVIEW_INVALID")])
+@pytest.mark.parametrize(
+    "transport,expected",
+    [(None, "FALLBACK"), (lambda request: {}, "JEV_REVIEW_INVALID")],
+)
 def test_jev_missing_or_malformed_shared_response(proj, transport, expected):
-    classifier = pytest.importorskip("factoryline.jev_classifier", reason="optional FactoryLine adapter is not installed")
+    classifier = pytest.importorskip(
+        "factoryline.jev_classifier",
+        reason="optional FactoryLine adapter is not installed",
+    )
     if not hasattr(classifier, "review_forgeline_packet"):
         pytest.skip("installed FactoryLine has no review_forgeline_packet API")
-    fill_good(proj); (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
-    material = {"profile": "repair", "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
-                "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}
-    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
-    result = o.review(proj / "notifier.ssat.yaml", material=material,
-                      reviewer=lambda packet: classifier.review_forgeline_packet(packet, transport=transport))
+    fill_good(proj)
+    (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
+    material = {
+        "profile": "repair",
+        "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
+        "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}],
+        "omissions": [],
+    }
+    o = Orchestrator(proj, "notifier")
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    o.store.set_state(State.FILLED)
+    result = o.review(
+        proj / "notifier.ssat.yaml",
+        material=material,
+        reviewer=lambda packet: classifier.review_forgeline_packet(
+            packet, transport=transport
+        ),
+    )
     assert result["reviewed"] is True and result["jev_review"]["status"] == expected
 
 
 def test_jev_supported_assessment_cannot_promote_deterministic_failure(proj):
-    classifier = pytest.importorskip("factoryline.jev_classifier", reason="optional FactoryLine adapter is not installed")
+    classifier = pytest.importorskip(
+        "factoryline.jev_classifier",
+        reason="optional FactoryLine adapter is not installed",
+    )
     if not hasattr(classifier, "review_forgeline_packet"):
         pytest.skip("installed FactoryLine has no review_forgeline_packet API")
-    fill_good(proj); (proj / "slices/notifier/formatter.py").write_text("raise NotImplementedError\n", encoding="utf-8")
+    fill_good(proj)
+    (proj / "slices/notifier/formatter.py").write_text(
+        "raise NotImplementedError\n", encoding="utf-8"
+    )
     (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
-    material = {"profile": "implementation", "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
-                "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}
-    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    material = {
+        "profile": "implementation",
+        "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
+        "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}],
+        "omissions": [],
+    }
+    o = Orchestrator(proj, "notifier")
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    o.store.set_state(State.FILLED)
+
     def reviewer(packet):
         def transport(request):
-            return {"context_sha256": request["context_sha256"], "claims": [{"claim_id": "c1", "label": "SUPPORTED",
-                "supporting_evidence_ids": ["e1"], "contradicting_evidence_ids": [], "rationale": "Assessment only.", "verification_action": None}]}
+            return {
+                "context_sha256": request["context_sha256"],
+                "claims": [
+                    {
+                        "claim_id": "c1",
+                        "label": "SUPPORTED",
+                        "supporting_evidence_ids": ["e1"],
+                        "contradicting_evidence_ids": [],
+                        "rationale": "Assessment only.",
+                        "verification_action": None,
+                        "contextual_evidence": [],
+                    }
+                ],
+            }
+
         return classifier.review_forgeline_packet(packet, transport=transport)
+
     result = o.review(proj / "notifier.ssat.yaml", material=material, reviewer=reviewer)
-    assert result["reviewed"] is False and result["jev_review"]["claims"][0]["label"] == "SUPPORTED"
-    assert o.store.state == State.BLOCKED and result["jev_review"]["release_decision"] is False
+    assert (
+        result["reviewed"] is False
+        and result["jev_review"]["claims"][0]["label"] == "SUPPORTED"
+    )
+    assert (
+        o.store.state == State.BLOCKED
+        and result["jev_review"]["release_decision"] is False
+    )
 
 
 @pytest.mark.parametrize("adapter_available", [False, True])
-def test_jev_cli_accepts_only_local_explicit_response(proj, capsys, monkeypatch, adapter_available):
+def test_jev_cli_accepts_only_local_explicit_response(
+    proj, capsys, monkeypatch, adapter_available
+):
     import builtins
     import json
     from forgeline.cli import main
+
     if adapter_available:
-        classifier = pytest.importorskip("factoryline.jev_classifier", reason="optional FactoryLine adapter is not installed")
+        classifier = pytest.importorskip(
+            "factoryline.jev_classifier",
+            reason="optional FactoryLine adapter is not installed",
+        )
         if not hasattr(classifier, "review_forgeline_packet"):
             pytest.skip("installed FactoryLine has no review_forgeline_packet API")
-        monkeypatch.setattr(classifier, "review_forgeline_packet",
-            lambda packet, transport: responses.append(transport({})) or {"status": "JEV_REVIEW_INVALID"}, raising=False)
+        monkeypatch.setattr(
+            classifier,
+            "review_forgeline_packet",
+            lambda packet, transport: responses.append(transport({}))
+            or {"status": "JEV_REVIEW_INVALID"},
+            raising=False,
+        )
     else:
         original_import = builtins.__import__
 
@@ -1597,14 +2312,40 @@ def test_jev_cli_accepts_only_local_explicit_response(proj, capsys, monkeypatch,
             return original_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", without_factoryline_adapter)
-    fill_good(proj); (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
-    (proj / "material.json").write_text(json.dumps({"profile": "implementation",
-        "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
-        "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}), encoding="utf-8")
+    fill_good(proj)
+    (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
+    (proj / "material.json").write_text(
+        json.dumps(
+            {
+                "profile": "implementation",
+                "criteria": [
+                    {"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}
+                ],
+                "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}],
+                "omissions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
     (proj / "response.json").write_text("{}", encoding="utf-8")
     responses = []
-    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
-    main(["review", "notifier", str(proj / "notifier.ssat.yaml"), "--root", str(proj), "--jev-material", "material.json", "--jev-response", "response.json"])
+    o = Orchestrator(proj, "notifier")
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    o.store.set_state(State.FILLED)
+    main(
+        [
+            "review",
+            "notifier",
+            str(proj / "notifier.ssat.yaml"),
+            "--root",
+            str(proj),
+            "--jev-material",
+            "material.json",
+            "--jev-response",
+            "response.json",
+        ]
+    )
     result = json.loads(capsys.readouterr().out)
     expected = "JEV_REVIEW_INVALID" if adapter_available else "FALLBACK"
     assert result["reviewed"] is True and result["jev_review"]["status"] == expected
@@ -1613,9 +2354,13 @@ def test_jev_cli_accepts_only_local_explicit_response(proj, capsys, monkeypatch,
 
 
 def test_arch_gate_receipt_has_attribution(proj):
-    o = _to_arch_gated(proj)
-    receipts = [json.loads(line) for line in
-                (proj / ".forge" / "notifier" / "receipts.jsonl").read_text().splitlines()]
+    _to_arch_gated(proj)
+    receipts = [
+        json.loads(line)
+        for line in (proj / ".forge" / "notifier" / "receipts.jsonl")
+        .read_text()
+        .splitlines()
+    ]
     gate = [item for item in receipts if item.get("phase") == "arch_gate"][-1]
     assert gate["attribution"]["n_checked"] == 2
     assert gate["attribution"]["rate"] == 1.0
@@ -1624,87 +2369,149 @@ def test_arch_gate_receipt_has_attribution(proj):
 # ============ Intent Thread — PRD->production traceability (v0.3) ============
 def test_intent_thread_no_envelope_is_untraceable(proj):
     from forgeline.intent_thread import verify_against_intent
+
     r = verify_against_intent(proj, "notifier", proj)
     assert not r.envelope_found
     assert any("IT_NO_ENVELOPE" in f for f in r.findings)
 
+
 def test_intent_thread_does_not_accept_keywords_as_verified_obligations(proj):
     import json
     from forgeline.intent_thread import verify_against_intent
+
     # write a sealed envelope with an auth assumption
-    (proj/"envelopes").mkdir(exist_ok=True)
-    (proj/"envelopes"/"notifier.json").write_text(json.dumps({
-        "sealed_hash": "abc123", "coherence_score": 90,
-        "assumptions": ["Assumes an identity/auth mechanism exists."]}))
+    (proj / "envelopes").mkdir(exist_ok=True)
+    (proj / "envelopes" / "notifier.json").write_text(
+        json.dumps(
+            {
+                "sealed_hash": "abc123",
+                "coherence_score": 90,
+                "assumptions": ["Assumes an identity/auth mechanism exists."],
+            }
+        )
+    )
     # code that DOES handle auth
-    d = proj/"slices"/"notifier"; d.mkdir(parents=True, exist_ok=True)
-    (d/"a.py").write_text("def login(token):\n    return authenticate(token)\ndef authenticate(t): return bool(t)\n")
+    d = proj / "slices" / "notifier"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "a.py").write_text(
+        "def login(token):\n    return authenticate(token)\ndef authenticate(t): return bool(t)\n"
+    )
     r = verify_against_intent(proj, "notifier", proj)
     assert r.envelope_found and r.obligations_met == 0 and not r.traceable
     assert r.unverified_assumptions
 
+
 def test_intent_thread_catches_unmet_obligation(proj):
     import json
     from forgeline.intent_thread import verify_against_intent
-    (proj/"envelopes").mkdir(exist_ok=True)
-    (proj/"envelopes"/"notifier.json").write_text(json.dumps({
-        "sealed_hash": "abc123", "coherence_score": 90,
-        "assumptions": ["Assumes an identity/auth mechanism exists."]}))
-    d = proj/"slices"/"notifier"; d.mkdir(parents=True, exist_ok=True)
-    (d/"a.py").write_text("def format_message(x):\n    return str(x)\n")  # no auth handling
+
+    (proj / "envelopes").mkdir(exist_ok=True)
+    (proj / "envelopes" / "notifier.json").write_text(
+        json.dumps(
+            {
+                "sealed_hash": "abc123",
+                "coherence_score": 90,
+                "assumptions": ["Assumes an identity/auth mechanism exists."],
+            }
+        )
+    )
+    d = proj / "slices" / "notifier"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "a.py").write_text(
+        "def format_message(x):\n    return str(x)\n"
+    )  # no auth handling
     r = verify_against_intent(proj, "notifier", proj)
     assert not r.traceable and r.unverified_assumptions
+
 
 def test_ship_blocks_on_intent_gap(proj):
     import json
     from forgeline.orchestrator import Orchestrator
     from forgeline.states import State
+
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.ARCHITECTED); o.architect(proj/"notifier.ssat.yaml")
-    fill_good(proj); o.store.set_state(State.FILLED)
-    o.review(proj/"notifier.ssat.yaml"); o.arch_gate(proj/"notifier.ssat.yaml")
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    fill_good(proj)
+    o.store.set_state(State.FILLED)
+    o.review(proj / "notifier.ssat.yaml")
+    o.arch_gate(proj / "notifier.ssat.yaml")
     # now plant an envelope with an unmet obligation
-    (proj/"envelopes").mkdir(exist_ok=True)
-    (proj/"envelopes"/"notifier.json").write_text(json.dumps({
-        "sealed_hash": "x", "coherence_score": 90,
-        "assumptions": ["Assumes external dependency availability (integration referenced)."]}))
-    write_smoke_manifest(proj); o.verify_tests(proj/"notifier.ssat.yaml"); o.smoke_gate()
+    (proj / "envelopes").mkdir(exist_ok=True)
+    (proj / "envelopes" / "notifier.json").write_text(
+        json.dumps(
+            {
+                "sealed_hash": "x",
+                "coherence_score": 90,
+                "assumptions": [
+                    "Assumes external dependency availability (integration referenced)."
+                ],
+            }
+        )
+    )
+    write_smoke_manifest(proj)
+    o.verify_tests(proj / "notifier.ssat.yaml")
+    o.smoke_gate()
     r = o.ship()
     assert r["shipped"] is False and r["unverified_assumptions"]
+
 
 def test_ship_succeeds_when_intent_honored(proj, monkeypatch):
     from forgeline.orchestrator import Orchestrator
     from forgeline.states import State
+
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.ARCHITECTED); o.architect(proj/"notifier.ssat.yaml")
-    fill_good(proj); o.store.set_state(State.FILLED)
-    o.review(proj/"notifier.ssat.yaml"); o.arch_gate(proj/"notifier.ssat.yaml")
-    write_smoke_manifest(proj); o.verify_tests(proj/"notifier.ssat.yaml"); o.smoke_gate()
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    fill_good(proj)
+    o.store.set_state(State.FILLED)
+    o.review(proj / "notifier.ssat.yaml")
+    o.arch_gate(proj / "notifier.ssat.yaml")
+    write_smoke_manifest(proj)
+    o.verify_tests(proj / "notifier.ssat.yaml")
+    o.smoke_gate()
     r = o.ship()  # no envelope -> ships (traceability opt-in), or with met obligations
     assert r["shipped"] is True
     from types import SimpleNamespace
-    monkeypatch.setattr("forgeline.intent_thread.verify_against_intent", lambda *args: SimpleNamespace(
-        envelope_found=True, traceable=False, unverified_assumptions=["gap"],
-        findings=["gap"], intent_hash="sealed", obligations_met=0, obligations_total=1))
+
+    monkeypatch.setattr(
+        "forgeline.intent_thread.verify_against_intent",
+        lambda *args: SimpleNamespace(
+            envelope_found=True,
+            traceable=False,
+            unverified_assumptions=["gap"],
+            findings=["gap"],
+            intent_hash="sealed",
+            obligations_met=0,
+            obligations_total=1,
+        ),
+    )
     assert o.ship()["shipped"] is False and o.store.state == State.SHIPPED
 
 
 # ---- runtime smoke gate ----
 
+
 def _to_arch_gated(proj):
     from forgeline.orchestrator import Orchestrator
     from forgeline.states import State
+
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.ARCHITECTED); o.architect(proj/"notifier.ssat.yaml")
-    fill_good(proj); o.store.set_state(State.FILLED)
-    o.review(proj/"notifier.ssat.yaml"); o.arch_gate(proj/"notifier.ssat.yaml")
+    o.store.set_state(State.ARCHITECTED)
+    o.architect(proj / "notifier.ssat.yaml")
+    fill_good(proj)
+    o.store.set_state(State.FILLED)
+    o.review(proj / "notifier.ssat.yaml")
+    o.arch_gate(proj / "notifier.ssat.yaml")
     return o
+
 
 def _to_tests_verified(proj):
     o = _to_arch_gated(proj)
     write_smoke_manifest(proj)
-    assert o.verify_tests(proj/"notifier.ssat.yaml")["verified"] is True
+    assert o.verify_tests(proj / "notifier.ssat.yaml")["verified"] is True
     return o
+
 
 def _file_hashes(root: Path) -> dict[str, str]:
     hashes = {}
@@ -1713,8 +2520,10 @@ def _file_hashes(root: Path) -> dict[str, str]:
         hashes[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
     return hashes
 
+
 def test_smoke_gate_passes_on_green_check(proj):
     from forgeline.states import State
+
     o = _to_tests_verified(proj)
     r = o.smoke_gate()
     assert r["smoked"] is True and o.store.state == State.SMOKED
@@ -1734,10 +2543,14 @@ def test_smoke_reuses_only_python_checks_with_current_evidence(
     manifest.write_text(json.dumps(data), encoding="utf-8")
     verify_runs = []
     from forgeline.gates.reverse_classical import verify_tests as verify_impl
+
     def tracked_verify(*args):
         verify_runs.append(1)
         return verify_impl(*args)
-    monkeypatch.setattr("forgeline.gates.reverse_classical.verify_tests", tracked_verify)
+
+    monkeypatch.setattr(
+        "forgeline.gates.reverse_classical.verify_tests", tracked_verify
+    )
     assert o.verify_tests(proj / "notifier.ssat.yaml")["verified"]
     if kind != "python":
         assert o.verify_tests(proj / "notifier.ssat.yaml")["verified"]
@@ -1756,10 +2569,33 @@ def test_smoke_reuses_only_python_checks_with_current_evidence(
     assert len(calls) == (1 if kind == "python" else 2)
     assert len(verify_runs) == expected_runs
     if kind != "python":
-        from forgeline.attribution import Attribution, FailureClass, GateResult, UnitResult
-        failed = GateResult(False, Attribution("verify_tests", 1, 0, [UnitResult(
-            "hollow", "verify_tests", False, "command passes against stub", FailureClass.HOLLOW_TEST)]))
-        monkeypatch.setattr("forgeline.gates.reverse_classical.verify_tests", lambda *args: failed)
+        from forgeline.attribution import (
+            Attribution,
+            FailureClass,
+            GateResult,
+            UnitResult,
+        )
+
+        failed = GateResult(
+            False,
+            Attribution(
+                "verify_tests",
+                1,
+                0,
+                [
+                    UnitResult(
+                        "hollow",
+                        "verify_tests",
+                        False,
+                        "command passes against stub",
+                        FailureClass.HOLLOW_TEST,
+                    )
+                ],
+            ),
+        )
+        monkeypatch.setattr(
+            "forgeline.gates.reverse_classical.verify_tests", lambda *args: failed
+        )
         assert not o.smoke_gate()["smoked"]
         assert o.store.latest_receipt("verify_tests", strict=True)["verified"] is False
         assert len(calls) == 2
@@ -1819,7 +2655,9 @@ def test_command_ship_is_fresh_and_repeat_ship_is_legal(proj, monkeypatch):
     assert o.smoke_gate()["smoked"]
     result = o.ship(verify_intent=False)
 
-    assert result["shipped"] is False and len(runs) == 2 and o.store.state == State.BLOCKED
+    assert (
+        result["shipped"] is False and len(runs) == 2 and o.store.state == State.BLOCKED
+    )
     assert o.verify_tests(proj / "notifier.ssat.yaml")["verified"]
     assert o.ship(verify_intent=False)["shipped"] is True
     assert o.ship(verify_intent=False)["shipped"] is True
@@ -1836,12 +2674,18 @@ def test_ship_rechecks_fingerprint_after_intent_verification(proj, monkeypatch):
         manifest = root / "smoke" / "notifier.json"
         manifest.write_text(manifest.read_text(encoding="utf-8") + "\n")
         return SimpleNamespace(
-            unverified_assumptions=[], findings=[], traceable=True,
-            envelope_found=False, intent_hash="intent", obligations_met=0,
+            unverified_assumptions=[],
+            findings=[],
+            traceable=True,
+            envelope_found=False,
+            intent_hash="intent",
+            obligations_met=0,
             obligations_total=0,
         )
 
-    monkeypatch.setattr("forgeline.intent_thread.verify_against_intent", drift_during_intent)
+    monkeypatch.setattr(
+        "forgeline.intent_thread.verify_against_intent", drift_during_intent
+    )
     result = o.ship()
 
     assert result["shipped"] is False and o.store.state == State.SMOKED
@@ -1860,23 +2704,41 @@ def test_verify_tests_rejects_inputs_changed_during_execution(proj, monkeypatch)
         source.write_text(source.read_text(encoding="utf-8") + "\n# drift\n")
         return result
 
-    monkeypatch.setattr("forgeline.gates.reverse_classical.verify_tests", mutate_after_verify)
+    monkeypatch.setattr(
+        "forgeline.gates.reverse_classical.verify_tests", mutate_after_verify
+    )
     result = o.verify_tests(proj / "notifier.ssat.yaml")
 
-    assert result["verified"] is False and o.store.latest_receipt("verify_tests", strict=True)["verified"] is False
-    assert o.store.latest_receipt("verify_tests")["reason"] == "verification inputs changed during execution"
+    assert (
+        result["verified"] is False
+        and o.store.latest_receipt("verify_tests", strict=True)["verified"] is False
+    )
+    assert (
+        o.store.latest_receipt("verify_tests")["reason"]
+        == "verification inputs changed during execution"
+    )
 
 
 @pytest.mark.parametrize("invalid", ["outside", "directory", "receipt"])
 def test_ssat_path_errors_fail_closed(proj, invalid):
     o = _to_tests_verified(proj) if invalid == "receipt" else _to_arch_gated(proj)
     if invalid == "receipt":
-        o.store.receipt(phase="verify_tests", verified=True,
-                        input_fingerprint="stale", input_components={"ssat_path": "../outside.ssat.yaml"})
+        o.store.receipt(
+            phase="verify_tests",
+            verified=True,
+            input_fingerprint="stale",
+            input_components={"ssat_path": "../outside.ssat.yaml"},
+        )
         result = o.smoke_gate()
     else:
-        path = proj.parent / "outside.ssat.yaml" if invalid == "outside" else proj / "ssat-directory"
-        path.write_text("modules: []\n", encoding="utf-8") if invalid == "outside" else path.mkdir()
+        path = (
+            proj.parent / "outside.ssat.yaml"
+            if invalid == "outside"
+            else proj / "ssat-directory"
+        )
+        path.write_text(
+            "modules: []\n", encoding="utf-8"
+        ) if invalid == "outside" else path.mkdir()
         result = o.verify_tests(path)
     assert result.get("verified", result.get("smoked")) is False
     assert "invalid" in result["reason"].lower() or "ssat" in result["reason"].lower()
@@ -1884,23 +2746,26 @@ def test_ssat_path_errors_fail_closed(proj, invalid):
 
 def test_smoke_gate_blocks_on_missing_manifest(proj):
     from forgeline.states import State
+
     o = _to_arch_gated(proj)
     r = o.smoke_gate()
     assert r["smoked"] is False
     assert "verify-tests" in r["reason"]
     assert o.store.state == State.ARCH_GATED
 
+
 def test_smoke_gate_blocks_on_runtime_failure(proj):
     from forgeline.states import State
+
     o = _to_arch_gated(proj)
-    write_smoke_manifest(proj, passing=False)   # asserts wrong result -> nonzero exit
-    assert o.verify_tests(proj/"notifier.ssat.yaml")["verified"] is True
+    write_smoke_manifest(proj, passing=False)  # asserts wrong result -> nonzero exit
+    assert o.verify_tests(proj / "notifier.ssat.yaml")["verified"] is True
     r = o.smoke_gate()
     assert r["smoked"] is False and o.store.state == State.BLOCKED
     assert r["failures"]
 
+
 def test_ship_requires_smoke_gate(proj):
-    from forgeline.states import State
     o = _to_arch_gated(proj)
     # skip smoke, go straight to ship -> refused
     r = o.ship()
@@ -1909,9 +2774,10 @@ def test_ship_requires_smoke_gate(proj):
 
 def test_verify_tests_passes_real_behavioral_check(proj):
     from forgeline.states import State
+
     o = _to_arch_gated(proj)
     write_smoke_manifest(proj, passing=True)
-    r = o.verify_tests(proj/"notifier.ssat.yaml")
+    r = o.verify_tests(proj / "notifier.ssat.yaml")
     assert r["verified"] is True
     assert o.store.state == State.TESTS_VERIFIED
     assert r["attribution"]["rate"] == 1.0
@@ -1923,7 +2789,9 @@ def test_verify_tests_invalidates_receipt_when_source_changes(proj):
     first = o.verify_tests(proj / "notifier.ssat.yaml")
     assert first["verified"] is True
     target = proj / "slices" / "notifier" / "formatter.py"
-    target.write_text(target.read_text(encoding="utf-8") + "\n# source changed\n", encoding="utf-8")
+    target.write_text(
+        target.read_text(encoding="utf-8") + "\n# source changed\n", encoding="utf-8"
+    )
 
     second = o.verify_tests(proj / "notifier.ssat.yaml")
     assert second["verified"] is True
@@ -1934,16 +2802,25 @@ def test_verify_tests_invalidates_receipt_when_source_changes(proj):
 
 def test_verify_tests_catches_assert_true_hollow_check(proj):
     from forgeline.states import State
+
     o = _to_arch_gated(proj)
     smoke = proj / "smoke"
     smoke.mkdir(exist_ok=True)
-    (smoke / "notifier.json").write_text(json.dumps({"checks": [{
-        "name": "assert_true",
-        "kind": "python",
-        "run": "assert True\nprint('OK')",
-        "expect_stdout": "OK",
-    }]}))
-    r = o.verify_tests(proj/"notifier.ssat.yaml")
+    (smoke / "notifier.json").write_text(
+        json.dumps(
+            {
+                "checks": [
+                    {
+                        "name": "assert_true",
+                        "kind": "python",
+                        "run": "assert True\nprint('OK')",
+                        "expect_stdout": "OK",
+                    }
+                ]
+            }
+        )
+    )
+    r = o.verify_tests(proj / "notifier.ssat.yaml")
     assert r["verified"] is False
     assert o.store.state == State.BLOCKED
     assert r["attribution"]["dominant_failure_class"] == "hollow_test"
@@ -1953,12 +2830,20 @@ def test_verify_tests_catches_trivially_true_assertion(proj):
     o = _to_arch_gated(proj)
     smoke = proj / "smoke"
     smoke.mkdir(exist_ok=True)
-    (smoke / "notifier.json").write_text(json.dumps({"checks": [{
-        "name": "assert_math",
-        "kind": "python",
-        "run": "assert 1 == 1",
-    }]}))
-    r = o.verify_tests(proj/"notifier.ssat.yaml")
+    (smoke / "notifier.json").write_text(
+        json.dumps(
+            {
+                "checks": [
+                    {
+                        "name": "assert_math",
+                        "kind": "python",
+                        "run": "assert 1 == 1",
+                    }
+                ]
+            }
+        )
+    )
+    r = o.verify_tests(proj / "notifier.ssat.yaml")
     assert r["verified"] is False
     assert r["attribution"]["units"][0]["failure_class"] == "hollow_test"
 
@@ -1967,24 +2852,30 @@ def test_verify_tests_honors_structural_exemption(proj):
     o = _to_arch_gated(proj)
     smoke = proj / "smoke"
     smoke.mkdir(exist_ok=True)
-    (smoke / "notifier.json").write_text(json.dumps({"checks": [
-        {
-            "name": "formatter_behavior",
-            "kind": "python",
-            "run": (
-                "import sys; sys.path.insert(0, '.')\n"
-                "from slices.notifier.formatter import format_message\n"
-                "assert format_message({'kind':'ping','text':'hi'}) == 'ping: hi'\n"
-            ),
-        },
-        {
-            "name": "module_imports",
-            "kind": "python",
-            "run": "import sys; sys.path.insert(0, '.')\nimport slices.notifier.formatter\n",
-            "must_fail_on_stub": False,
-        },
-    ]}))
-    r = o.verify_tests(proj/"notifier.ssat.yaml")
+    (smoke / "notifier.json").write_text(
+        json.dumps(
+            {
+                "checks": [
+                    {
+                        "name": "formatter_behavior",
+                        "kind": "python",
+                        "run": (
+                            "import sys; sys.path.insert(0, '.')\n"
+                            "from slices.notifier.formatter import format_message\n"
+                            "assert format_message({'kind':'ping','text':'hi'}) == 'ping: hi'\n"
+                        ),
+                    },
+                    {
+                        "name": "module_imports",
+                        "kind": "python",
+                        "run": "import sys; sys.path.insert(0, '.')\nimport slices.notifier.formatter\n",
+                        "must_fail_on_stub": False,
+                    },
+                ]
+            }
+        )
+    )
+    r = o.verify_tests(proj / "notifier.ssat.yaml")
     assert r["verified"] is True
     evidence = [unit["evidence"] for unit in r["attribution"]["units"]]
     assert any("exempt" in item for item in evidence)
@@ -1994,13 +2885,21 @@ def test_verify_tests_absent_field_defaults_strict(proj):
     o = _to_arch_gated(proj)
     smoke = proj / "smoke"
     smoke.mkdir(exist_ok=True)
-    (smoke / "notifier.json").write_text(json.dumps({"checks": [{
-        "name": "quietly_unmarked",
-        "kind": "python",
-        "run": "print('OK')",
-        "expect_stdout": "OK",
-    }]}))
-    r = o.verify_tests(proj/"notifier.ssat.yaml")
+    (smoke / "notifier.json").write_text(
+        json.dumps(
+            {
+                "checks": [
+                    {
+                        "name": "quietly_unmarked",
+                        "kind": "python",
+                        "run": "print('OK')",
+                        "expect_stdout": "OK",
+                    }
+                ]
+            }
+        )
+    )
+    r = o.verify_tests(proj / "notifier.ssat.yaml")
     assert r["verified"] is False
     assert r["attribution"]["dominant_failure_class"] == "hollow_test"
 
@@ -2009,20 +2908,28 @@ def test_verify_tests_all_exempt_manifest_blocks(proj):
     o = _to_arch_gated(proj)
     smoke = proj / "smoke"
     smoke.mkdir(exist_ok=True)
-    (smoke / "notifier.json").write_text(json.dumps({"checks": [{
-        "name": "module_imports",
-        "kind": "python",
-        "run": "import slices.notifier.formatter",
-        "must_fail_on_stub": False,
-    }]}))
-    r = o.verify_tests(proj/"notifier.ssat.yaml")
+    (smoke / "notifier.json").write_text(
+        json.dumps(
+            {
+                "checks": [
+                    {
+                        "name": "module_imports",
+                        "kind": "python",
+                        "run": "import slices.notifier.formatter",
+                        "must_fail_on_stub": False,
+                    }
+                ]
+            }
+        )
+    )
+    r = o.verify_tests(proj / "notifier.ssat.yaml")
     assert r["verified"] is False
     assert r["attribution"]["dominant_failure_class"] == "hollow_manifest"
 
 
 def test_verify_tests_missing_and_empty_manifest_block(proj):
     o = _to_arch_gated(proj)
-    missing = o.verify_tests(proj/"notifier.ssat.yaml")
+    missing = o.verify_tests(proj / "notifier.ssat.yaml")
     assert missing["verified"] is False
     assert missing["attribution"]["dominant_failure_class"] == "hollow_manifest"
 
@@ -2030,7 +2937,7 @@ def test_verify_tests_missing_and_empty_manifest_block(proj):
     smoke = proj / "smoke"
     smoke.mkdir(exist_ok=True)
     (smoke / "notifier.json").write_text(json.dumps({"checks": []}))
-    empty = o.verify_tests(proj/"notifier.ssat.yaml")
+    empty = o.verify_tests(proj / "notifier.ssat.yaml")
     assert empty["verified"] is False
     assert empty["attribution"]["dominant_failure_class"] == "hollow_manifest"
 
@@ -2053,7 +2960,7 @@ def test_verify_tests_does_not_touch_working_tree(proj):
     write_smoke_manifest(proj)
     target = proj / "slices" / "notifier"
     before = _file_hashes(target)
-    assert o.verify_tests(proj/"notifier.ssat.yaml")["verified"] is True
+    assert o.verify_tests(proj / "notifier.ssat.yaml")["verified"] is True
     assert _file_hashes(target) == before
 
 
@@ -2071,6 +2978,7 @@ def test_materialized_stub_is_deterministic_and_identical_to_scaffold(proj, tmp_
         assert _file_hashes(first) == _file_hashes(expected)
     finally:
         import shutil
+
         shutil.rmtree(first, ignore_errors=True)
         shutil.rmtree(second, ignore_errors=True)
 
@@ -2079,7 +2987,9 @@ def test_adopt_existing_typescript_repo_writes_reviewable_baseline(tmp_path):
     from forgeline.adoption import adopt
 
     (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "sum.ts").write_text("export function sum(a: number, b: number): number { return a + b; }")
+    (tmp_path / "src" / "sum.ts").write_text(
+        "export function sum(a: number, b: number): number { return a + b; }"
+    )
     (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}')
     result = adopt(tmp_path, "math")
     assert result["languages"] == ["typescript"]
@@ -2092,13 +3002,19 @@ def test_typescript_mutant_verification_requires_existing_test_to_fail(tmp_path)
 
     (tmp_path / "src").mkdir()
     (tmp_path / ".forge" / "math").mkdir(parents=True)
-    (tmp_path / "src" / "sum.ts").write_text("export function sum(a: number, b: number): number { return a + b; }")
+    (tmp_path / "src" / "sum.ts").write_text(
+        "export function sum(a: number, b: number): number { return a + b; }"
+    )
     manifest = {
-        "mutants": [{
-            "name": "sum_returns_stub", "path": "src/sum.ts",
-            "replace_regex": "return a \\+ b;", "replacement": "throw new Error('FORGE_STUB');",
-            "command": "python -c \"import pathlib; assert 'FORGE_STUB' not in pathlib.Path('src/sum.ts').read_text()\"",
-        }]
+        "mutants": [
+            {
+                "name": "sum_returns_stub",
+                "path": "src/sum.ts",
+                "replace_regex": "return a \\+ b;",
+                "replacement": "throw new Error('FORGE_STUB');",
+                "command": "python -c \"import pathlib; assert 'FORGE_STUB' not in pathlib.Path('src/sum.ts').read_text()\"",
+            }
+        ]
     }
     path = tmp_path / ".forge" / "math" / "typescript-mutants.json"
     path.write_text(json.dumps(manifest))
@@ -2113,11 +3029,20 @@ def test_typescript_mutant_verification_refuses_a_broken_baseline(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / ".forge" / "math").mkdir(parents=True)
     (tmp_path / "src" / "sum.ts").write_text("export const sum = () => 2;")
-    manifest = {"mutants": [{
-        "name": "sum_stub", "path": "src/sum.ts", "replace_regex": "=> 2", "replacement": "=> 0",
-        "command": "python -c \"raise SystemExit(1)\"",
-    }]}
-    (tmp_path / ".forge" / "math" / "typescript-mutants.json").write_text(json.dumps(manifest))
+    manifest = {
+        "mutants": [
+            {
+                "name": "sum_stub",
+                "path": "src/sum.ts",
+                "replace_regex": "=> 2",
+                "replacement": "=> 0",
+                "command": 'python -c "raise SystemExit(1)"',
+            }
+        ]
+    }
+    (tmp_path / ".forge" / "math" / "typescript-mutants.json").write_text(
+        json.dumps(manifest)
+    )
     result = verify_typescript_tests(tmp_path, "math")
     assert result.passed is False
     assert result.attribution.failures[0].failure_class.value == "hollow_manifest"
@@ -2128,7 +3053,9 @@ def test_typescript_mutant_verification_rejects_incomplete_manifest(tmp_path):
     from forgeline.gates.typescript_mutants import verify_typescript_tests
 
     (tmp_path / ".forge" / "math").mkdir(parents=True)
-    (tmp_path / ".forge" / "math" / "typescript-mutants.json").write_text(json.dumps({"mutants": [{"name": "missing-fields"}]}))
+    (tmp_path / ".forge" / "math" / "typescript-mutants.json").write_text(
+        json.dumps({"mutants": [{"name": "missing-fields"}]})
+    )
     result = verify_typescript_tests(tmp_path, "math")
     assert result.passed is False
     assert result.attribution.failures[0].failure_class.value == "hollow_manifest"
@@ -2136,11 +3063,12 @@ def test_typescript_mutant_verification_rejects_incomplete_manifest(tmp_path):
 
 def test_verify_tests_temp_root_is_cleaned_up(proj):
     import tempfile
+
     o = _to_arch_gated(proj)
     write_smoke_manifest(proj)
     tmp = Path(tempfile.gettempdir())
     before = {path for path in tmp.glob("forge-stub-*")}
-    assert o.verify_tests(proj/"notifier.ssat.yaml")["verified"] is True
+    assert o.verify_tests(proj / "notifier.ssat.yaml")["verified"] is True
     after = {path for path in tmp.glob("forge-stub-*")}
     assert after == before
 
@@ -2148,17 +3076,35 @@ def test_verify_tests_temp_root_is_cleaned_up(proj):
 def test_hollow_test_maps_to_structural_edit():
     from forgeline.attribution import FailureClass
     from forgeline.refinement import select_edit
+
     assert select_edit(FailureClass.HOLLOW_TEST).edit_class == "structural"
 
 
 def test_smoke_attribution_is_per_check_and_verdict_derived(proj):
     from forgeline.gates.runtime_smoke import runtime_smoke
+
     smoke = proj / "smoke"
     smoke.mkdir(exist_ok=True)
-    (smoke / "notifier.json").write_text(json.dumps({"checks": [
-        {"name": "green", "kind": "python", "run": "print('ok')", "expect_stdout": "ok"},
-        {"name": "wrong", "kind": "python", "run": "print('no')", "expect_stdout": "yes"},
-    ]}))
+    (smoke / "notifier.json").write_text(
+        json.dumps(
+            {
+                "checks": [
+                    {
+                        "name": "green",
+                        "kind": "python",
+                        "run": "print('ok')",
+                        "expect_stdout": "ok",
+                    },
+                    {
+                        "name": "wrong",
+                        "kind": "python",
+                        "run": "print('no')",
+                        "expect_stdout": "yes",
+                    },
+                ]
+            }
+        )
+    )
     report = runtime_smoke(proj, "notifier")
     gate = report.gate_result
     assert gate.passed is False
@@ -2171,11 +3117,14 @@ def test_smoke_attribution_is_per_check_and_verdict_derived(proj):
 def test_edit_order_pareto_and_plateau(tmp_path):
     from forgeline.attribution import FailureClass
     from forgeline.refinement import pareto_win, refine, select_edit
+
     assert select_edit(FailureClass.SIGNATURE_DRIFT).edit_class == "structural"
-    assert pareto_win({"smoke": 1.0, "judge": 1.0},
-                      {"smoke": 0.5, "judge": 1.0}, "smoke")
-    assert not pareto_win({"smoke": 1.0, "judge": 0.5},
-                          {"smoke": 0.5, "judge": 1.0}, "smoke")
+    assert pareto_win(
+        {"smoke": 1.0, "judge": 1.0}, {"smoke": 0.5, "judge": 1.0}, "smoke"
+    )
+    assert not pareto_win(
+        {"smoke": 1.0, "judge": 0.5}, {"smoke": 0.5, "judge": 1.0}, "smoke"
+    )
     state = {"rates": {"smoke": 0.5}, "reverts": 0}
     result = refine(
         lambda: dict(state["rates"]),
@@ -2195,6 +3144,7 @@ def test_edit_order_pareto_and_plateau(tmp_path):
 
 def test_orchestrator_refine_reverts_tree_byte_identically(proj):
     from forgeline.attribution import FailureClass
+
     target = proj / "slices" / "target.py"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b"before\n")
@@ -2219,7 +3169,9 @@ def test_orchestrator_refine_reverts_tree_byte_identically(proj):
 def test_optimize_pr_has_bounded_loop_and_approval_boundary(proj, monkeypatch):
     from forgeline import pr_optimizer
 
-    monkeypatch.setattr(pr_optimizer, "_changed", lambda root, base: ["src/auth/login.py", "README.md"])
+    monkeypatch.setattr(
+        pr_optimizer, "_changed", lambda root, base: ["src/auth/login.py", "README.md"]
+    )
     plan = pr_optimizer.optimize_pr(proj, "notifier")
     assert plan["loop"]["max_iterations"] == 5
     assert plan["approval_required"] is True
@@ -2229,30 +3181,37 @@ def test_optimize_pr_has_bounded_loop_and_approval_boundary(proj, monkeypatch):
 
 def test_javascript_literal_braces_use_real_parser(proj):
     from forgeline.source_scope import analyze_source
-    target = proj / 'literal.mjs'
+
+    target = proj / "literal.mjs"
     target.write_text('export function openBrace() { return "{"; }\n')
-    assert analyze_source(target, proj)['status'] == 'ok'
-    target.write_text('export function broken() {\n')
-    assert analyze_source(target, proj)['status'] == 'syntax_error'
+    assert analyze_source(target, proj)["status"] == "ok"
+    target.write_text("export function broken() {\n")
+    assert analyze_source(target, proj)["status"] == "syntax_error"
 
 
 def test_qa_python_quoted_attacks_are_data_but_calls_and_secrets_are_detected(proj):
     from forgeline.gates.qa_audit import qa_audit
-    target = proj / 'rules.py'
-    target.write_text('examples = ["eval(value)", "pickle.loads(value)", "shell=True", "verify=False", "api_key = \'fixture-value\'"]\n')
-    assert not any('QA_SEC' in item for item in qa_audit(proj).findings)
-    target.write_text('from pickle import loads as decode\nimport subprocess as process\napi_key = "real-looking-secret"\ndef unsafe(value):\n    process.run(value, shell=True)\n    return decode(value)\n')
+
+    target = proj / "rules.py"
+    target.write_text(
+        'examples = ["eval(value)", "pickle.loads(value)", "shell=True", "verify=False", "api_key = \'fixture-value\'"]\n'
+    )
+    assert not any("QA_SEC" in item for item in qa_audit(proj).findings)
+    target.write_text(
+        'from pickle import loads as decode\nimport subprocess as process\napi_key = "real-looking-secret"\ndef unsafe(value):\n    process.run(value, shell=True)\n    return decode(value)\n'
+    )
     findings = qa_audit(proj).findings
-    assert any('pickle' in item for item in findings)
-    assert any('shell=True' in item for item in findings)
-    assert any('hard-coded credential' in item for item in findings)
+    assert any("pickle" in item for item in findings)
+    assert any("shell=True" in item for item in findings)
+    assert any("hard-coded credential" in item for item in findings)
 
 
 def test_qa_python_executable_patterns_survive_whitespace(proj):
     from forgeline.gates.qa_audit import qa_audit
-    target = proj / 'bad.py'
-    target.write_text('def bad(value):\n    return eval (value)\n')
-    assert any('eval()' in item for item in qa_audit(proj).findings)
+
+    target = proj / "bad.py"
+    target.write_text("def bad(value):\n    return eval (value)\n")
+    assert any("eval()" in item for item in qa_audit(proj).findings)
 
 
 def test_python_security_alias_resolution_respects_scope_and_late_shadowing(proj):
@@ -2296,18 +3255,31 @@ def test_python_security_alias_resolution_respects_scope_and_late_shadowing(proj
     )
 
     report = qa_audit(proj, source_paths=[feature])
-    resolved_calls, unknown_calls = _python_security_text(ast.parse(feature.read_text(encoding="utf-8")))
+    resolved_calls, unknown_calls = _python_security_text(
+        ast.parse(feature.read_text(encoding="utf-8"))
+    )
     security = [item for item in report.findings if item.startswith("QA_SEC")]
 
-    assert resolved_calls.count("pickle.loads(") == 4  # Module, nested import, and lambda default/body.
+    assert (
+        resolved_calls.count("pickle.loads(") == 4
+    )  # Module, nested import, and lambda default/body.
     assert resolved_calls.count("json.loads(") == 1
-    assert "shell=True" in resolved_calls  # Unknown targets still retain security-relevant arguments.
+    assert (
+        "shell=True" in resolved_calls
+    )  # Unknown targets still retain security-relevant arguments.
     assert "codec.loads" in unknown_calls  # Argument shadow and late local binding.
-    assert unknown_calls.count("codec.loads") == 1  # Shadowed references are deduplicated by spelling.
+    assert (
+        unknown_calls.count("codec.loads") == 1
+    )  # Shadowed references are deduplicated by spelling.
     assert "local_decode" in unknown_calls  # Relative import remains unresolved.
-    assert "loads" in unknown_calls  # A function-local relative import shadows the outer dangerous alias.
+    assert (
+        "loads" in unknown_calls
+    )  # A function-local relative import shadows the outer dangerous alias.
     assert "local_loads" in unknown_calls
     assert any("pickle" in item for item in security)
     assert any("shell=True" in item for item in security)
     assert report.security_score == 55
-    assert any(name.endswith("codec.loads") for name in report.metrics["unknown_security_calls"])
+    assert any(
+        name.endswith("codec.loads")
+        for name in report.metrics["unknown_security_calls"]
+    )

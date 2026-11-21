@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import re
@@ -104,6 +105,7 @@ def declared_paths(root: Path, ssat: dict) -> list[Path]:
 
 _NODE_TYPESCRIPT_AST = r"""
 const fs = require('fs');
+const crypto = require('crypto');
 const ts = require(process.env.FORGELINE_TYPESCRIPT_PATH || 'typescript');
 const argOffset = process.argv[1] && process.argv[1].endsWith('.cjs') ? 2 : 1;
 const file = process.argv[argOffset];
@@ -179,7 +181,167 @@ function visit(node) {
   ts.forEachChild(node, visit);
 }
 visit(tree);
-console.log(JSON.stringify({errors, functions}));
+
+// Only an imported Cloudflare DurableObject subclass can establish the
+// receiver identity needed for the narrow native-SQLite exec exception.
+function bindingContains(pattern, name) {
+  if (ts.isIdentifier(pattern)) return pattern.text === name;
+  if (ts.isObjectBindingPattern(pattern) || ts.isArrayBindingPattern(pattern)) {
+    return pattern.elements.some(element => bindingContains(element.name, name));
+  }
+  return false;
+}
+function containsDestructuringTarget(node) {
+  if (ts.isArrayLiteralExpression(node)) return true;
+  if (ts.isObjectLiteralExpression(node)) return true;
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+    return containsDestructuringTarget(node.left);
+  }
+  return false;
+}
+function isThisRooted(node) {
+  let current = node;
+  while (current && (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current))) {
+    current = current.expression;
+  }
+  return Boolean(current && current.kind === ts.SyntaxKind.ThisKeyword);
+}
+function isClassCtxMember(member) {
+  const name = member.name;
+  return Boolean(name && (ts.isIdentifier(name) || ts.isStringLiteral(name)
+    || ts.isNoSubstitutionTemplateLiteral(name)) && name.text === 'ctx');
+}
+function classHasCtxMember(classNode) {
+  for (const member of classNode.members) if (isClassCtxMember(member)) return true;
+  return false;
+}
+function isComputedClassMember(node) {
+  return (ts.isPropertyDeclaration(node) || ts.isMethodDeclaration(node)
+    || ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node))
+    && ts.isComputedPropertyName(node.name);
+}
+function isThisAssignment(node) {
+  return ts.isBinaryExpression(node) && assignmentOperator(node)
+    && (containsDestructuringTarget(node.left)
+      || ((ts.isElementAccessExpression(node.left) || ts.isPropertyAccessExpression(node.left))
+        && isThisRooted(node.left)));
+}
+function isMutationHelperCall(node) {
+  if (!ts.isCallExpression(node)) return false;
+  const methods = new Set(['defineProperty', 'defineProperties', 'setPrototypeOf', 'assign']);
+  const callee = node.expression;
+  return (ts.isIdentifier(callee) && methods.has(callee.text))
+    || (ts.isPropertyAccessExpression(callee) && methods.has(callee.name.text));
+}
+function hasMutationTargetArgument(node) {
+  return node.arguments.some(argument => isThisRooted(argument)
+    || (ts.isIdentifier(argument) && argument.text === 'ctx'));
+}
+function isContextMutation(node) {
+  return isComputedClassMember(node) || isThisAssignment(node)
+    || (isMutationHelperCall(node) && hasMutationTargetArgument(node));
+}
+function computedThisWriteOrDestructure(node) {
+  const pending = [node];
+  while (pending.length) {
+    const current = pending.pop();
+    if (isContextMutation(current)) return true;
+    ts.forEachChild(current, child => { pending.push(child); });
+  }
+  return false;
+}
+function topLevelBinds(name) {
+  return tree.statements.some(statement => {
+    if (ts.isImportDeclaration(statement)) return false;
+    if (statement.name && bindingContains(statement.name, name)) return true;
+    if (ts.isVariableStatement(statement)) return statement.declarationList.declarations.some(declaration =>
+      bindingContains(declaration.name, name));
+    return false;
+  });
+}
+const durableObjectImports = new Set();
+for (const statement of tree.statements) {
+  if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)
+      || statement.moduleSpecifier.text !== 'cloudflare:workers') continue;
+  const clause = statement.importClause;
+  const bindings = clause && clause.namedBindings;
+  if (!clause || clause.isTypeOnly || !bindings || !ts.isNamedImports(bindings)) continue;
+  for (const element of bindings.elements) {
+    if (!element.isTypeOnly && (element.propertyName || element.name).text === 'DurableObject'
+        && !topLevelBinds(element.name.text)) durableObjectImports.add(element.name.text);
+  }
+}
+function assignmentOperator(node) {
+  return node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+    && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment;
+}
+function classHasUnprovenContextMutation(classNode) {
+  return classHasCtxMember(classNode) || computedThisWriteOrDestructure(classNode);
+}
+function isCloudflareDurableObject(classNode) {
+  // Keep imported-binding resolution simple and sound: nested declarations can
+  // inherit a function parameter or local named like the imported base.
+  if (classNode.parent !== tree) return false;
+  const clause = classNode.heritageClauses && classNode.heritageClauses.find(item => item.token === ts.SyntaxKind.ExtendsKeyword);
+  if (!clause || clause.types.length !== 1) return false;
+  const base = clause.types[0].expression;
+  return ts.isIdentifier(base) && durableObjectImports.has(base.text) && !classHasUnprovenContextMutation(classNode);
+}
+function exactSqlReceiver(node) {
+  if (!ts.isPropertyAccessExpression(node) || node.name.text !== 'sql'
+      || !ts.isPropertyAccessExpression(node.expression) || node.expression.name.text !== 'storage') return null;
+  const base = node.expression.expression;
+  return ts.isPropertyAccessExpression(base) && base.name.text === 'ctx'
+    && base.expression.kind === ts.SyntaxKind.ThisKeyword ? 'this' : null;
+}
+function isStaticSqlMember(node) {
+  if (!(ts.isMethodDeclaration(node) || ts.isPropertyDeclaration(node)
+      || ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node))) return false;
+  return Boolean(node.modifiers && node.modifiers.some(modifier => modifier.kind === ts.SyntaxKind.StaticKeyword));
+}
+function isUnsafeSqlEnclosure(node) {
+  if (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)
+      || (ts.isMethodDeclaration(node) && !ts.isClassDeclaration(node.parent))) return true;
+  if (node.kind === ts.SyntaxKind.ClassStaticBlockDeclaration) return true;
+  return isStaticSqlMember(node);
+}
+function enclosingDurableObject(call) {
+  for (let current = call.parent; current; current = current.parent) {
+    if (isUnsafeSqlEnclosure(current)) return null;
+    if (ts.isClassDeclaration(current)) {
+      if (!isCloudflareDurableObject(current)) return null;
+      const receiverKind = call.expression && ts.isPropertyAccessExpression(call.expression)
+        ? exactSqlReceiver(call.expression.expression) : null;
+      return receiverKind === 'this' ? current : null;
+    }
+  }
+  return null;
+}
+const safeSqlExecSpans = [];
+const unknownSqlExecs = [];
+function inspectCalls(node) {
+  if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === 'exec' && exactSqlReceiver(node.expression.expression)
+      && enclosingDurableObject(node)) {
+    const query = node.arguments[0];
+    const staticQuery = Boolean(query && (ts.isStringLiteral(query)
+      || query.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral)
+      && !node.arguments.some(argument => ts.isSpreadElement(argument)));
+    const line = tree.getLineAndCharacterOfPosition(node.expression.name.getStart(tree)).line + 1;
+    if (staticQuery) {
+      const start = tree.getLineAndCharacterOfPosition(node.expression.name.getStart(tree));
+      const end = tree.getLineAndCharacterOfPosition(node.expression.name.end);
+      safeSqlExecSpans.push([start.line, start.character, end.line, end.character]);
+    }
+    else unknownSqlExecs.push({line, callee: node.expression.getText(tree)});
+  }
+  ts.forEachChild(node, inspectCalls);
+}
+inspectCalls(tree);
+const normalizedSource = source.replace(/\r\n?/g, '\n');
+const sourceSha256 = crypto.createHash('sha256').update(normalizedSource, 'utf8').digest('hex');
+console.log(JSON.stringify({errors, functions, safe_sql_exec_spans: safeSqlExecSpans,
+  unknown_sql_execs: unknownSqlExecs, source_sha256: sourceSha256}));
 """
 
 
@@ -366,10 +528,15 @@ def validate_generated_script(source: str, target: Path) -> str:
 def _analyze_javascript(path: Path, root: Path, text: str, node: str) -> dict:
     compiler = _typescript_compiler_parse(node, path, root, language="javascript")
     if compiler is not None:
+        if compiler.get("source_sha256") != hashlib.sha256(text.encode("utf-8")).hexdigest():
+            return {"status": "parser_unsupported", "language": "javascript", "text": text,
+                    "reason": "source changed during TypeScript AST analysis"}
         if compiler["errors"]:
             return {"status": "syntax_error", "language": "javascript", "text": text,
                     "error": "; ".join(compiler["errors"])}
         return {"status": "ok", "language": "javascript", "text": text, "functions": compiler["functions"],
+                "safe_sql_exec_spans": compiler.get("safe_sql_exec_spans", []),
+                "unknown_sql_execs": compiler.get("unknown_sql_execs", []),
                 "parser": "typescript-compiler", "function_metrics_status": "exact"}
     try:
         checked = _node_syntax_check(node, path, root)
@@ -385,10 +552,15 @@ def _analyze_javascript(path: Path, root: Path, text: str, node: str) -> dict:
 def _analyze_typescript(path: Path, root: Path, text: str, node: str) -> dict:
     compiler = _typescript_compiler_parse(node, path, root)
     if compiler is not None:
+        if compiler.get("source_sha256") != hashlib.sha256(text.encode("utf-8")).hexdigest():
+            return {"status": "parser_unsupported", "language": "typescript", "text": text,
+                    "reason": "source changed during TypeScript AST analysis"}
         if compiler["errors"]:
             return {"status": "syntax_error", "language": "typescript", "text": text,
                     "error": "; ".join(compiler["errors"])}
         return {"status": "ok", "language": "typescript", "text": text, "functions": compiler["functions"],
+                "safe_sql_exec_spans": compiler.get("safe_sql_exec_spans", []),
+                "unknown_sql_execs": compiler.get("unknown_sql_execs", []),
                 "parser": "typescript-compiler", "function_metrics_status": "exact"}
     if path.suffix.lower() == ".tsx":
         return {"status": "parser_unsupported", "language": "typescript", "text": text,
