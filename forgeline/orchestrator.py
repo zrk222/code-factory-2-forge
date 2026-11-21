@@ -371,7 +371,23 @@ class Orchestrator:
         erosion = check_erosion(ssat, self.root)
         j_ok, j = judge_consistency(ssat, self.root, erosion=erosion)
         feature_paths = declared_paths(self.root, ssat)
-        g_ok, g = grumpy_review(self.root, source_paths=feature_paths)
+        if "review_scopes" in ssat:
+            review_scopes = ssat["review_scopes"]
+            g_ok, g = grumpy_review(
+                self.root, source_paths=feature_paths, review_scopes=review_scopes,
+                declared_modules=ssat.get("modules"),
+            )
+            adversary_scope = {
+                "mode": "explicit_symbols",
+                "scopes": review_scopes,
+                "coverage": "listed Python AST symbols only; not a full-module safety certificate",
+            }
+        else:
+            g_ok, g = grumpy_review(self.root, source_paths=feature_paths)
+            adversary_scope = {
+                "mode": "default_source_heuristics",
+                "coverage": "declared source files; heuristic scan, not a full-module safety certificate",
+            }
         qa = qa_audit(self.root, source_paths=feature_paths)
         all_findings = j + g + [f"{v.code} {v.message}" for v in erosion] + qa.findings
         all_ok = j_ok and g_ok and not erosion and qa.passed
@@ -391,14 +407,19 @@ class Orchestrator:
                            grumpy_ok=g_ok, erosion=len(erosion),
                            qa_grade=qa.grade, qa_metrics=qa.metrics,
                            active_constraints_fired=list(prevented.keys()),
-                           findings=all_findings, attribution=review_attr)
+                           findings=all_findings, attribution=review_attr,
+                           adversary_scope=adversary_scope)
         if all_ok:
-            return self._finish_review(True, attempt, qa, all_findings, review_attr,
-                                       material, jev_packet, jev_result)
+            result = self._finish_review(True, attempt, qa, all_findings, review_attr,
+                                         material, jev_packet, jev_result)
+            result["adversary_scope"] = adversary_scope
+            return result
 
         # record lessons, then PROMOTE recurring ones into active policy (recursion)
-        return self._finish_review(False, attempt, qa, all_findings, review_attr,
-                                   material, jev_packet, jev_result)
+        result = self._finish_review(False, attempt, qa, all_findings, review_attr,
+                                     material, jev_packet, jev_result)
+        result["adversary_scope"] = adversary_scope
+        return result
 
     def arch_gate(self, ssat_path: Path) -> dict:
         ssat = load_ssat(ssat_path)

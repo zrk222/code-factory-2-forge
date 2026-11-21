@@ -174,6 +174,18 @@ insecure* and makes the generator prove otherwise. Executable heuristics catch
 eval/exec/shell-injection/hard-coded-secrets/bare-excepts, and it refuses to
 pass any code that ships without tests (`A_NO_PROOF` — "prove it works"). No
 LLM required to be useful; an LLM adversary layers behind the same interface.
+An SSAT may opt into bounded `review_scopes` entries (`module`, `symbol`,
+`max_lines`) to refine only the `A_SUBPROC` check to those declared Python
+functions, async functions, or classes. The AST check resolves module-level
+subprocess imports and aliases, and rejects their references plus recognized
+dynamic-import forms in each selected unit. It conservatively rejects any use
+of imported `builtins` or `importlib` module aliases to cover indirect
+attribute access. This is not general arbitrary Python data-flow analysis.
+Missing, malformed, ambiguous,
+unresolved, escaping, unsupported, or over-limit scopes block review; without
+`review_scopes`, the existing whole-source heuristic remains unchanged. Scoped
+acceptance covers only the listed AST units: it is not a full-module or
+transitive-callee safety certificate, nor a runtime sandbox.
 
 **A self-improving skill flywheel.** Every gate failure records a structured
 lesson to `skills/lessons.jsonl`. Lessons are injected into the next attempt's

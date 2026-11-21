@@ -786,6 +786,137 @@ def test_grumpy_adversary_demands_tests_and_catches_danger(proj):
     joined = " ".join(complaints)
     assert "A_EVAL" in joined and "A_NO_PROOF" in joined
 
+
+def test_scoped_adversary_limits_subprocess_to_exact_declared_python_symbol(proj):
+    from forgeline.gates import grumpy_review
+
+    source = proj / "src" / "worker.py"
+    source.parent.mkdir()
+    source.write_text(
+        "import subprocess as process\n"
+        "def target():\n"
+        "    # subprocess.run is only mentioned in this comment\n"
+        "    return 'subprocess.run is only a string'\n\n"
+        "def legacy():\n"
+        "    return process.run(['legacy-command'])\n",
+        encoding="utf-8",
+    )
+    (proj / "tests").mkdir()
+    (proj / "tests" / "test_worker.py").write_text("def test_worker(): pass\n", encoding="utf-8")
+    modules = [{"name": "worker", "path": "src/worker.py"}]
+    scopes = [{"module": "worker", "symbol": "target", "max_lines": 10}]
+
+    scoped_ok, scoped_findings = grumpy_review(
+        proj, source_paths=(path for path in [source]), review_scopes=scopes, declared_modules=modules,
+    )
+    assert scoped_ok, scoped_findings
+    unscoped_ok, unscoped_findings = grumpy_review(proj, source_paths=[source])
+    assert not unscoped_ok
+    assert any("A_SUBPROC" in finding for finding in unscoped_findings)
+
+
+@pytest.mark.parametrize("body", [
+    "import subprocess\n    subprocess.run(['x'])\n",
+    "from subprocess import run as execute\n    execute(['x'])\n",
+    "import subprocess as process\n    process.run(['x'])\n",
+    "__import__('subprocess').run(['x'])\n",
+    "import importlib as loader\n    loader.import_module('subprocess').run(['x'])\n",
+    "from importlib import import_module as load\n    load('subprocess').run(['x'])\n",
+    "import subprocess as process\n    getattr(process, 'run')(['x'])\n",
+])
+def test_scoped_adversary_rejects_raw_imported_aliased_and_dynamic_subprocess(proj, body):
+    from forgeline.gates import grumpy_review
+
+    source = proj / "src" / "worker.py"
+    source.parent.mkdir()
+    source.write_text("def target():\n" + "".join(f"    {line}" for line in body.splitlines(keepends=True)), encoding="utf-8")
+    (proj / "tests").mkdir()
+    (proj / "tests" / "test_worker.py").write_text("def test_worker(): pass\n", encoding="utf-8")
+    ok, findings = grumpy_review(
+        proj, source_paths=[source],
+        review_scopes=[{"module": "worker", "symbol": "target", "max_lines": 20}],
+        declared_modules=[{"name": "worker", "path": "src/worker.py"}],
+    )
+    assert not ok
+    assert any("A_SUBPROC" in finding for finding in findings)
+
+
+@pytest.mark.parametrize("source_text", [
+    "import subprocess as process\nalias = process\ndef target():\n    alias.run(['x'])\n",
+    "from subprocess import *\ndef target():\n    run(['x'])\n",
+    "import subprocess as process\ndef target(command=process.run):\n    return command\n",
+    "import subprocess as process\nclass target:\n    def run(self):\n        return process.run(['x'])\n",
+    "import importlib\nloader = importlib.import_module\ndef target():\n    loader('subprocess')\n",
+    "loader = __import__\ndef target():\n    loader('subprocess')\n",
+    "from builtins import __import__ as load\ndef target(name):\n    return load(name).run(['x'])\n",
+    "import builtins as bi\ndef target(name):\n    return bi.__import__(name).run(['x'])\n",
+    "import builtins as bi\nload = bi.__import__\ndef target(name):\n    return load(name).run(['x'])\n",
+    "import builtins as bi\ndef target(name):\n    return getattr(bi, '__import__')(name).run(['x'])\n",
+])
+def test_scoped_adversary_rejects_module_alias_chains_and_wildcard_imports(proj, source_text):
+    from forgeline.gates import grumpy_review
+
+    source = proj / "src" / "worker.py"
+    source.parent.mkdir()
+    source.write_text(source_text, encoding="utf-8")
+    (proj / "tests").mkdir()
+    (proj / "tests" / "test_worker.py").write_text("def test_worker(): pass\n", encoding="utf-8")
+    ok, findings = grumpy_review(
+        proj, source_paths=[source],
+        review_scopes=[{"module": "worker", "symbol": "target", "max_lines": 20}],
+        declared_modules=[{"name": "worker", "path": "src/worker.py"}],
+    )
+    assert not ok
+    assert any("A_SUBPROC" in finding for finding in findings)
+
+
+@pytest.mark.parametrize("scopes,modules,expected", [
+    ([], [{"name": "worker", "path": "src/worker.py"}], "non-empty list"),
+    (None, [{"name": "worker", "path": "src/worker.py"}], "non-empty list"),
+    ([{"module": "worker", "symbol": "target", "max_lines": 10, "note": "unreviewed"}], [{"name": "worker", "path": "src/worker.py"}], "only module, symbol, and max_lines"),
+    ([{"module": "missing", "symbol": "target", "max_lines": 10}], [{"name": "worker", "path": "src/worker.py"}], "unknown declared module"),
+    ([{"module": "worker", "symbol": "target", "max_lines": 1001}], [{"name": "worker", "path": "src/worker.py"}], "max_lines"),
+    ([{"module": "worker", "symbol": "target", "max_lines": 10}, {"module": "worker", "symbol": "target", "max_lines": 10}], [{"name": "worker", "path": "src/worker.py"}], "duplicate symbol"),
+    ([{"module": "worker", "symbol": "target", "max_lines": 1}], [{"name": "worker", "path": "src/worker.py"}], "exceeds max_lines"),
+    ([{"module": "worker", "symbol": "missing", "max_lines": 10}], [{"name": "worker", "path": "src/worker.py"}], "expected one exact"),
+    ([{"module": "worker", "symbol": "target", "max_lines": 10}], [{"name": "worker", "path": "../outside.py"}], "escapes source root"),
+    ([{"module": "worker", "symbol": "target", "max_lines": 10}], [{"name": "worker", "path": "src/worker.js"}], "only Python AST"),
+])
+def test_scoped_adversary_invalid_scopes_fail_closed(proj, scopes, modules, expected):
+    from forgeline.gates import grumpy_review
+
+    source = proj / "src" / "worker.py"
+    source.parent.mkdir()
+    source.write_text("def target():\n    return 'ok'\n", encoding="utf-8")
+    (proj / "tests").mkdir()
+    (proj / "tests" / "test_worker.py").write_text("def test_worker(): pass\n", encoding="utf-8")
+    ok, findings = grumpy_review(
+        proj, source_paths=[source], review_scopes=scopes, declared_modules=modules,
+    )
+    assert not ok
+    assert any("A_REVIEW_SCOPE" in finding and expected in finding for finding in findings)
+
+
+def test_orchestrator_reports_scoped_adversary_boundary_and_rejects_null_scopes(proj):
+    spec_path = proj / "notifier.ssat.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    spec["review_scopes"] = [{"module": "sender", "symbol": "send", "max_lines": 20}]
+    spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    fill_good(proj)
+    orchestrator = Orchestrator(proj, "notifier")
+    orchestrator.store.set_state(State.FILLED)
+
+    scoped = orchestrator.review(spec_path)
+    assert scoped["adversary_scope"]["mode"] == "explicit_symbols"
+    assert "not a full-module safety certificate" in scoped["adversary_scope"]["coverage"]
+
+    spec["review_scopes"] = None
+    spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    orchestrator.store.set_state(State.FILLED)
+    rejected = orchestrator.review(spec_path)
+    assert rejected["reviewed"] is False
+    assert any("A_REVIEW_SCOPE" in finding for finding in rejected["findings"])
+
 def test_judge_catches_unfilled_stubs(proj):
     from forgeline.gates import judge_consistency
     ssat = load_ssat(proj/"notifier.ssat.yaml")
