@@ -6,10 +6,11 @@ from __future__ import annotations
 import hashlib, json, shutil, sys, os
 from io import BytesIO, TextIOWrapper
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import yaml
-from .states import State, can_transition, IllegalTransition
-from .run_store import RunStore
-from .ssat import ScaffoldError, load_ssat, parse_ssat, scaffold_from_ssat, check_erosion
+from .states import State, can_transition, IllegalTransition, blocked_gate
+from .run_store import RunStore, _atomic_write
+from .ssat import ScaffoldError, parse_ssat, scaffold_from_ssat, check_erosion
 from .gates import judge_consistency, grumpy_review, skill_check
 from .gates.judge import build_jev_review_packet, jev_snapshot, valid_jev_advisory
 from .gates.qa_audit import qa_audit
@@ -21,9 +22,13 @@ from . import __version__
 
 MAX_REFINE = 3
 
+
+class ContractApprovalError(ValueError):
+    pass
+
 _NEXT_ACTION = {
     State.INTENT: "forge expand <feature> --root .",
-    State.EXPANDED: "forge gate architected <feature> --root .",
+    State.EXPANDED: "forge gate architected <feature> <ssat.yaml> --root .",
     State.ARCHITECTED: "forge architect <feature> <ssat.yaml> --root . (add --adopt-existing for implemented targets)",
     State.SCAFFOLDED: "forge fill <feature> <ssat.yaml> --root .",
     State.FILLED: "forge review <feature> <ssat.yaml> --root .",
@@ -117,9 +122,11 @@ def _verify_tests_fingerprint(root: Path, feature: str, ssat_path: Path) -> dict
     executable = Path(sys.executable).resolve()
     shell_path = Path(shutil.which(shell) or shell).resolve()
     from .gates import reverse_classical, runtime_smoke
+    gate_paths = (reverse_classical.__file__, runtime_smoke.__file__)
+    if any(path is None for path in gate_paths):
+        raise ValueError("verification gate provenance is unavailable")
     context_parts = [
-        *(hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
-          for module in (reverse_classical, runtime_smoke)),
+        *(hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in gate_paths if path is not None),
         [hashlib.sha256(executable.read_bytes()).hexdigest(), str(executable), sys.version],
         [hashlib.sha256(shell_path.read_bytes()).hexdigest(), str(shell_path)],
         [sys.platform, str(root)],
@@ -129,7 +136,7 @@ def _verify_tests_fingerprint(root: Path, feature: str, ssat_path: Path) -> dict
     components["execution_context"] = context
     canonical = json.dumps(components, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return {"sha256": hashlib.sha256(canonical).hexdigest(), "components": components,
-            "python_only": bool(checks) and all(check.kind == "python" for check in checks)}
+            "python_only": bool(checks) and all(check.kind == "python" for check in (checks or []))}
 
 
 def _verified_inputs(store: RunStore, root: Path, feature: str) -> tuple[dict, dict]:
@@ -208,29 +215,85 @@ def _smoke_execution(store: RunStore, root: Path, feature: str, inputs: dict):
 
 
 class Orchestrator:
-    def __init__(self, root: Path, feature: str):
+    def __init__(self, root: Path, feature: str, *, create=True):
         self.root = Path(root); self.feature = feature
-        self.store = RunStore(self.root, feature)
+        self.store = RunStore(self.root, feature, create=create)
 
     def _advance(self, to: State, note: str = "", **receipt):
-        frm = self.store.state
-        if not can_transition(frm, to):
-            raise IllegalTransition(f"{frm.value} -> {to.value}")
-        self.store.set_state(to, note)
-        self.store.receipt(transition=f"{frm.value}->{to.value}", **receipt)
+        current = self.store.state
+        if not can_transition(current, to):
+            raise IllegalTransition(f"{current.value} -> {to.value}")
+        self.store.transition(current, to, note, **receipt)
 
-    def approve_architecture(self) -> dict:
-        """Record the explicit human confidence gate before scaffolding."""
-        if self.store.state != State.EXPANDED:
-            return {"approved": False, "reason": f"expected expanded, got {self.store.state.value}"}
-        self._advance(State.ARCHITECTED, "architecture approved by CLI operator", approver="human")
-        return {"approved": True, "state": State.ARCHITECTED.value}
+    def expand(self) -> dict:
+        current = self.store.state
+        if current == State.EXPANDED:
+            return {"expanded": True, "state": current.value, "reused": True}
+        if current != State.INTENT:
+            return {"expanded": False, "state": current.value,
+                    "error": {"code": "E_ILLEGAL_TRANSITION", "message": "use status to resume this run"}}
+        try:
+            self.store.transition(State.INTENT, State.EXPANDED, "use cases drafted", phase="expand")
+        except IllegalTransition:
+            if self.store.state != State.EXPANDED:
+                raise
+            return {"expanded": True, "state": State.EXPANDED.value, "reused": True}
+        return {"expanded": True, "state": State.EXPANDED.value}
+
+    def _contract(self, ssat_path):
+        path = (self.root / (ssat_path or f"{self.feature}.ssat.yaml")).resolve()
+        relative = path.relative_to(self.root.resolve()).as_posix()
+        raw = path.read_bytes()
+        ssat = parse_ssat(raw)
+        if not isinstance(ssat, dict):
+            raise ValueError("SSAT must be a YAML mapping")
+        return ssat, {"ssat_path": relative, "ssat_sha256": hashlib.sha256(raw).hexdigest()}
+
+    def _require_approved_binding(self, binding):
+        approved = self.store.latest_receipt("architecture_approval", strict=True)
+        if approved and any(approved.get(key) != value for key, value in binding.items()):
+            raise ContractApprovalError("SSAT differs from the reviewed architecture")
+
+    def _approved_contract(self, ssat_path):
+        ssat, binding = self._contract(ssat_path)
+        self._require_approved_binding(binding)
+        return ssat
+
+    def approve_architecture(self, ssat_path: Path | None = None) -> dict:
+        with self.store.operation():
+            return self._approve_architecture(ssat_path)
+
+    def _approve_architecture(self, ssat_path: Path | None) -> dict:
+        current = self.store.state
+        if current not in {State.EXPANDED, State.ARCHITECTED}:
+            return {"approved": False, "reason": f"expected expanded or architected, got {current.value}"}
+        try:
+            _, binding = self._contract(ssat_path)
+        except (OSError, ValueError, yaml.YAMLError) as error:
+            return {"approved": False, "error": {"code": "E_SSAT", "message": str(error)}}
+        existing = self.store.latest_receipt("architecture_approval", strict=True)
+        if current == State.ARCHITECTED and existing and all(existing.get(k) == v for k, v in binding.items()):
+            return {"approved": True, "state": current.value, "reused": True, **binding}
+        self.store._transition(current, State.ARCHITECTED, "architecture approved by CLI operator",
+                               phase="architecture_approval", approver="human", **binding)
+        return {"approved": True, "state": State.ARCHITECTED.value, **binding}
+
+    def _phase_error(self, phase, *ready, also_retry=()):
+        run = self.store.load()
+        failed = blocked_gate(run)
+        if State(run["state"]) in ready or failed in (phase, *also_retry):
+            return None
+        return {"code": "E_PHASE_PREREQUISITE", "current_state": run["state"],
+                "failed_gate": failed, "message": "run the phase shown by forge status"}
 
     def fill(self, ssat_path: Path) -> dict:
         """Verify implemented bodies and advance the previously unreachable FILLED state."""
-        if self.store.state not in {State.SCAFFOLDED, State.BLOCKED}:
-            return {"filled": False, "reason": f"expected scaffolded or blocked, got {self.store.state.value}"}
-        ssat = load_ssat(ssat_path)
+        try:
+            ssat = self._approved_contract(ssat_path)
+        except ContractApprovalError as error:
+            return {"filled": False, "error": {"code": "E_SSAT_APPROVAL", "message": str(error)}}
+        if phase_error := self._phase_error("fill", State.SCAFFOLDED):
+            return {"filled": False, "error": phase_error}
         ok, findings = judge_consistency(ssat, self.root)
         attr = _gate_attribution("fill", [
             ("implementation", ok, "all declared bodies implemented" if ok else " | ".join(findings),
@@ -239,7 +302,7 @@ class Orchestrator:
         self.store.receipt(phase="fill", passed=ok, findings=findings, attribution=attr)
         if not ok:
             if self.store.state != State.BLOCKED:
-                self._advance(State.BLOCKED, "fill verification failed")
+                self._advance(State.BLOCKED, "fill verification failed", failed_gate="fill")
             return {"filled": False, "findings": findings, "attribution": attr}
         self._advance(State.FILLED, "implemented bodies verified", attribution=attr)
         return {"filled": True, "attribution": attr}
@@ -252,9 +315,20 @@ class Orchestrator:
         adopt_existing: bool = False,
         dry_run: bool = False,
     ) -> dict:
-        """Safely materialize the SSAT scaffold only from an allowed state."""
-        current = self.store.state
-        if current not in {State.ARCHITECTED, State.BLOCKED}:
+        """Preview freely, or hold the feature lock through scaffold and commit."""
+        if dry_run:
+            return self._architect(ssat_path, force, adopt_existing, dry_run=True)
+        with self.store.operation():
+            return self._architect(ssat_path, force, adopt_existing, dry_run=False)
+
+    def _architect(self, ssat_path, force, adopt_existing, *, dry_run):
+        try:
+            current = self.store.state
+        except FileNotFoundError:
+            current = State.INTENT
+        preview_before_approval = dry_run and current == State.EXPANDED
+        retry_scaffold = current == State.BLOCKED and blocked_gate(self.store.load()) == "scaffold"
+        if current != State.ARCHITECTED and not (retry_scaffold or preview_before_approval):
             return {
                 "scaffolded": False,
                 "error": {
@@ -265,19 +339,18 @@ class Orchestrator:
                 },
             }
         try:
-            ssat_bytes = Path(ssat_path).read_bytes()
-            ssat = load_ssat(ssat_path)
-        except (OSError, yaml.YAMLError) as error:
-            return {
-                "scaffolded": False,
-                "error": {"code": "E_SSAT", "message": f"cannot read SSAT: {error}"},
-            }
-        if not isinstance(ssat, dict):
-            return {
-                "scaffolded": False,
-                "error": {"code": "E_SSAT", "message": "SSAT must be a YAML mapping"},
-            }
-        ssat_sha256 = hashlib.sha256(ssat_bytes).hexdigest()
+            approval = self.store.latest_receipt("architecture_approval", strict=True)
+            ssat, binding = self._contract(ssat_path)
+        except (OSError, ValueError, yaml.YAMLError) as error:
+            return {"scaffolded": False, "error": {"code": "E_SSAT", "message": f"cannot read SSAT: {error}"}}
+        matches_approval = approval and all(approval.get(key) == value for key, value in binding.items())
+        if not (matches_approval or preview_before_approval):
+            return {"scaffolded": False, "error": {
+                "code": "E_SSAT_APPROVAL", "message": "approve the current SSAT before scaffolding",
+                "next_argv": ["forge", "gate", "architected", self.feature, binding["ssat_path"],
+                              "--root", str(self.root.resolve())],
+            }}
+        ssat_sha256 = binding["ssat_sha256"]
         try:
             report = scaffold_from_ssat(
                 ssat,
@@ -296,10 +369,11 @@ class Orchestrator:
             "report": report.to_dict(),
         }
         if dry_run:
-            return result
-        self._advance(
-            State.SCAFFOLDED,
+            return result | {"requires_approval": not bool(matches_approval)}
+        self.store._transition(
+            current, State.SCAFFOLDED,
             "adopt existing modules from SSAT" if adopt_existing else "scaffold from SSAT",
+            phase="scaffold", ssat_path=binding["ssat_path"],
             mode="adopt_existing" if adopt_existing else "scaffold",
             ssat_sha256=ssat_sha256,
             modules=len(ssat.get("modules", [])),
@@ -342,7 +416,8 @@ class Orchestrator:
         return packet, result
 
     def _review_success(self, attempt, qa, attribution):
-        self._advance(State.REVIEWED, f"review pass (attempt {attempt}, QA={qa.grade})")
+        if self.store.state != State.REVIEWED:
+            self._advance(State.REVIEWED, f"review pass (attempt {attempt}, QA={qa.grade})")
         return {"reviewed": True, "attempt": attempt, "qa_grade": qa.grade,
                 "qa_metrics": qa.metrics, "attribution": attribution}
 
@@ -353,7 +428,7 @@ class Orchestrator:
         kernel = LearningKernel(self.root)
         promoted = kernel.promote(lessons_for(self.root, "fill")); kernel.audit_effectiveness()
         if self.store.state != State.BLOCKED:
-            self._advance(State.BLOCKED, f"review failed (attempt {attempt}, QA={qa.grade})")
+            self._advance(State.BLOCKED, f"review failed (attempt {attempt}, QA={qa.grade})", failed_gate="review")
         escalation = ("normal" if attempt == 1 else
                       "elevated: fix ALL findings, not just blockers" if attempt == 2 else
                       "final: exhausted - human review required")
@@ -387,7 +462,12 @@ class Orchestrator:
     def review(self, ssat_path: Path, *, material: dict | None = None, reviewer=None) -> dict:
         """Judge + grumpy adversary + arch erosion + deep QA audit, with a
         recursive learning kernel and escalating refine loop."""
-        ssat = load_ssat(ssat_path)
+        try:
+            ssat = self._approved_contract(ssat_path)
+        except ContractApprovalError as error:
+            return {"reviewed": False, "error": {"code": "E_SSAT_APPROVAL", "message": str(error)}}
+        if phase_error := self._phase_error("review", State.FILLED, State.REVIEWED):
+            return {"reviewed": False, "error": phase_error}
         attempt = self.store.bump_attempt("review")
         kernel = LearningKernel(self.root)
         erosion = check_erosion(ssat, self.root)
@@ -423,7 +503,12 @@ class Orchestrator:
                                    material, jev_packet, jev_result)
 
     def arch_gate(self, ssat_path: Path) -> dict:
-        ssat = load_ssat(ssat_path)
+        try:
+            ssat = self._approved_contract(ssat_path)
+        except ContractApprovalError as error:
+            return {"passed": False, "error": {"code": "E_SSAT_APPROVAL", "message": str(error)}}
+        if phase_error := self._phase_error("arch_gate", State.REVIEWED):
+            return {"passed": False, "error": phase_error}
         erosion = check_erosion(ssat, self.root)
         s_ok, s = skill_check(self.root, self.feature)
         arch_attr = _gate_attribution("arch_gate", [
@@ -438,43 +523,80 @@ class Orchestrator:
                                erosion=[f"{v.code} {v.message}" for v in erosion], skill=s,
                                attribution=arch_attr)
             if self.store.state != State.BLOCKED:
-                self._advance(State.BLOCKED, "arch gate failed")
+                self._advance(State.BLOCKED, "arch gate failed", failed_gate="arch_gate")
             return {"passed": False, "erosion": [f"{v.code} {v.message}" for v in erosion] + s,
                     "attribution": arch_attr}
-        # must currently be REVIEWED to legally gate
-        if self.store.state == State.BLOCKED:
-            self.store.set_state(State.REVIEWED, "recovered for arch gate")
         kernel = LearningKernel(self.root)
         eff = kernel.audit_effectiveness()
-        self._advance(State.ARCH_GATED, "architecture CI gate passed")
-        self.store.receipt(phase="arch_gate", passed=True, learning=eff,
-                           active_policy=kernel.policy_summary(), attribution=arch_attr)
+        self._advance(State.ARCH_GATED, "architecture CI gate passed", phase="arch_gate",
+                      passed=True, learning=eff, active_policy=kernel.policy_summary(), attribution=arch_attr)
         return {"passed": True, "learning": eff, "attribution": arch_attr}
 
-    def handoff_decisions(self, spec_path: Path) -> dict | None:
-        """If SpecLine + HSF are importable and the spec has a decision table,
-        compile decisions through the factory. Best-effort seam."""
+    def handoff_decisions(self, spec_path: Path) -> dict:
+        """Export the selected SpecLine decision table as pinned HSF input."""
         try:
-            sys.path.insert(0, str(Path(__file__).resolve().parents[2]/"specline"))
-            from specline.spec_lint import decision_rows  # type: ignore
-        except Exception:
-            return None
-        rows = decision_rows(spec_path)
-        if not rows:
-            return None
-        self.store.receipt(phase="handoff", decision_rules=len(rows),
-                           note="decision table present — route to HSF compile")
-        return {"decision_rules": len(rows), "next": "hsf compile"}
+            from specline.handoff import handoff_to_hsf
+            from specline.spec_lint import decision_rows
+        except ImportError:
+            return {"state": "blocked", "error": {"code": "E_SPECLINE_REQUIRED",
+                                                 "message": "install code-factory-1-spec"}}
+        root = self.root.resolve()
+        source = (root / spec_path).resolve()
+        try:
+            raw = source.read_bytes()
+        except OSError as error:
+            return {"state": "blocked", "error": {"code": "E_SPEC", "message": str(error)}}
+        # The existing SpecLine exporter reads one canonical name. Snapshot the
+        # explicit input so the table count and export use identical bytes.
+        with TemporaryDirectory(prefix="forge-handoff-") as temporary:
+            staging = Path(temporary)
+            staged_spec = staging / "specs" / f"{self.feature}.md"
+            staged_spec.parent.mkdir()
+            staged_spec.write_bytes(raw)
+            rows = decision_rows(staged_spec)
+            if not rows:
+                return {"state": "no_decisions", "decision_rules": 0}
+            yaml_bytes = handoff_to_hsf(staging, self.feature).read_bytes()
+        output = root / "handoff"
+        if output.resolve() != output:
+            return {"state": "blocked", "error": {"code": "E_HANDOFF_PATH", "message": "handoff directory must be local"}}
+        digest = hashlib.sha256(yaml_bytes).hexdigest()
+        manifest = output / f"{self.feature}_decisions-{digest[:16]}.yaml"
+        goldens = root / "goldens" / f"{self.feature}_decisions" / "cases.jsonl"
+        binding = {"decision_rules": len(rows), "spec_sha256": hashlib.sha256(raw).hexdigest(),
+                   "hsf_spec_sha256": digest, "hsf_spec": manifest.relative_to(root).as_posix()}
+        with self.store.operation():
+            output.mkdir(exist_ok=True)
+            if manifest.is_symlink() or (manifest.exists() and manifest.read_bytes() != yaml_bytes):
+                return {"state": "blocked", "error": {"code": "E_HANDOFF_DRIFT",
+                                                       "message": "exported handoff bytes have changed"}}
+            if not manifest.is_file():
+                _atomic_write(manifest, yaml_bytes)
+            latest = self.store.latest_receipt("handoff", strict=True)
+            if not latest or any(latest.get(key) != value for key, value in binding.items()):
+                self.store._append(self.store._sealed({"phase": "handoff", **binding}))
+        return {
+            "state": "ready_to_compile" if goldens.is_file() else "needs_goldens",
+            "decision_rules": len(rows),
+            "hsf_spec": str(manifest),
+            "hsf_spec_sha256": digest,
+            "goldens": str(goldens),
+            "cwd": str(root),
+            "next_argv": ["hsf", "compile", str(manifest), "--expected-spec-file-sha256", digest, "--json"],
+        }
 
-    def smoke_gate(self, *, force: bool = False) -> dict:
+    def smoke_gate(self, *, force: bool = False, _ship_retry=False) -> dict:
         """Runtime behavior verification — the behavior-by-inspection gate.
         Runs the built artifact against declared behavioral checks (smoke/<feature>.json)
         in isolated subprocesses. Blocks ship on any runtime failure. This is the
         right-sized version of a per-PR preview deployment: verify the thing RUNS
         and behaves, not just that it type-checks and honors the spec."""
         from .gates.runtime_smoke import smoke_report_lines
-        state = self.store.state
-        if state not in {State.TESTS_VERIFIED, State.SMOKED, State.SHIPPED}:
+        run = self.store.load()
+        state = State(run["state"])
+        failed = blocked_gate(run)
+        retry_smoke = failed == "smoke_gate" or (_ship_retry and failed == "ship")
+        if state not in {State.TESTS_VERIFIED, State.SMOKED, State.SHIPPED} and not retry_smoke:
             return {"smoked": False,
                     "reason": "tests not verified - run `forge verify-tests` first"}
         try:
@@ -507,17 +629,17 @@ class Orchestrator:
         attr = rep.gate_result.attribution.to_dict()
         result = _smoke_response(rep, lines, attr)
         passed = result["smoked"]
-        if passed and self.store.state not in {State.SMOKED, State.SHIPPED}:
-            self._advance(State.SMOKED, "runtime behavior verified")
-        elif not passed:
-            if self.store.state not in {State.BLOCKED, State.SHIPPED}:
-                self._advance(State.BLOCKED, "runtime smoke gate failed")
-        self.store.receipt(phase="smoke_gate", smoked=passed,
-                           input_fingerprint=inputs["sha256"],
-                           manifest_found=rep.manifest_found,
-                           failures=[failure.name for failure in rep.failures],
-                           checks=len(rep.results), report=lines, attribution=attr,
-                           reason=result.get("reason"))
+        state = self.store.state
+        receipt = dict(phase="smoke_gate", smoked=passed,
+                       input_fingerprint=inputs["sha256"], manifest_found=rep.manifest_found,
+                       failures=[failure.name for failure in rep.failures],
+                       checks=len(rep.results), report=lines, attribution=attr, reason=result.get("reason"))
+        if passed and state not in {State.SMOKED, State.SHIPPED}:
+            self._advance(State.SMOKED, "runtime behavior verified", **receipt)
+        elif not passed and state not in {State.BLOCKED, State.SHIPPED}:
+            self._advance(State.BLOCKED, "runtime smoke gate failed", failed_gate="smoke_gate", **receipt)
+        else:
+            self.store.receipt(**receipt)
         return result
 
     def _record_verify_result(self, gate, fingerprint: dict, drifted: bool,
@@ -527,19 +649,20 @@ class Orchestrator:
             "verification inputs changed during reverse-classical execution",
             FailureClass.RUNTIME_CRASH,
         )]).to_dict() if drifted else gate.attribution.to_dict())
-        if not gate.passed or drifted:
-            reason = "verification inputs changed during execution" if drifted else None
-            self.store.receipt(phase="verify_tests", verified=False, attribution=attr,
-                               input_fingerprint=fingerprint["sha256"],
-                               input_components=fingerprint["components"], reason=reason)
+        passed = gate.passed and not drifted
+        receipt = dict(phase="verify_tests", verified=passed, attribution=attr,
+                       input_fingerprint=fingerprint["sha256"], input_components=fingerprint["components"])
+        if not passed:
+            receipt["reason"] = "verification inputs changed during execution" if drifted else None
             if self.store.state not in {State.BLOCKED, State.SHIPPED}:
-                self._advance(State.BLOCKED, "reverse-classical test verification failed")
+                self._advance(State.BLOCKED, "reverse-classical test verification failed", failed_gate="verify_tests", **receipt)
+            else:
+                self.store.receipt(**receipt)
             return {"verified": False, "reason": "hollow smoke check(s) found", "attribution": attr}
-        if not preserve_state:
-            self._advance(State.TESTS_VERIFIED, "smoke checks proven non-hollow", attribution=attr)
-        self.store.receipt(phase="verify_tests", verified=True, attribution=attr,
-                           input_fingerprint=fingerprint["sha256"],
-                           input_components=fingerprint["components"])
+        if preserve_state:
+            self.store.receipt(**receipt)
+        else:
+            self._advance(State.TESTS_VERIFIED, "smoke checks proven non-hollow", **receipt)
         return {"verified": True, "checks": gate.attribution.n_checked, "attribution": attr,
                 "input_fingerprint": fingerprint["sha256"]}
 
@@ -569,9 +692,17 @@ class Orchestrator:
     def verify_tests(self, ssat_path: Path) -> dict:
         """Verify smoke checks can fail before trusting smoke results."""
         try:
-            fingerprint = _verify_tests_fingerprint(self.root, self.feature, Path(ssat_path))
+            ssat_path = (self.root / ssat_path).resolve()
+            fingerprint = _verify_tests_fingerprint(self.root, self.feature, ssat_path)
+            components = fingerprint["components"]
+            self._require_approved_binding({"ssat_path": components["ssat_path"], "ssat_sha256": components["ssat"]})
+        except ContractApprovalError as error:
+            return {"verified": False, "error": {"code": "E_SSAT_APPROVAL", "message": str(error)}}
         except (OSError, ValueError, TypeError) as error:
             return {"verified": False, "reason": f"invalid verification inputs: {error}"}
+        if phase_error := self._phase_error("verify_tests", State.ARCH_GATED, State.TESTS_VERIFIED, State.SMOKED,
+                                      State.SHIPPED, also_retry=("smoke_gate", "ship")):
+            return {"verified": False, "reason": "architecture gate not passed - run forge status", "error": phase_error}
         cached, previous = _verify_cache(self.store, self.store.state, fingerprint)
         if cached:
             return cached
@@ -611,7 +742,7 @@ class Orchestrator:
                                unverified_assumptions=trace.unverified_assumptions,
                                findings=trace.findings, attribution=attribution)
             if self.store.state not in {State.BLOCKED, State.SHIPPED}:
-                self._advance(State.BLOCKED, "intent-traceability gap")
+                self._advance(State.BLOCKED, "intent-traceability gap", failed_gate="ship")
             return {"shipped": False, "reason": "intent evidence is incomplete or invalid",
                     "unverified_assumptions": trace.unverified_assumptions,
                     "findings": trace.findings}, trace, attribution
@@ -648,19 +779,21 @@ class Orchestrator:
             except (ImportError, SystemExit, ValueError, OSError, KeyError, TypeError, RuntimeError):
                 self.store.receipt(phase="ship", shipped=False, reason="intent evidence changed before promotion")
                 return {"shipped": False, "reason": "intent evidence changed before promotion"}
-        if self.store.state != State.SHIPPED:
-            self._advance(State.SHIPPED, "all gates green")
         obligations = (f"{trace.obligations_met}/{trace.obligations_total}" if trace else None)
-        self.store.receipt(phase="ship", shipped=True,
-                           intent_hash=(trace.intent_hash if trace else None),
-                           obligations=obligations, attribution=attribution)
+        receipt = dict(phase="ship", shipped=True, intent_hash=(trace.intent_hash if trace else None),
+                       obligations=obligations, attribution=attribution)
+        if self.store.state != State.SHIPPED:
+            self._advance(State.SHIPPED, "all gates green", **receipt)
+        else:
+            self.store.receipt(**receipt)
         return {"shipped": True, "intent_evidence": evidence,
                 "intent_traceable": (trace.traceable if trace else None),
                 "obligations_met": obligations, "attribution": attribution}
 
     def ship(self, verify_intent: bool = True) -> dict:
-        if self.store.state in {State.ARCH_GATED, State.TESTS_VERIFIED, State.SMOKED, State.SHIPPED}:
-            smoke = self.smoke_gate(force=True)
+        retry_ship = blocked_gate(self.store.load()) == "ship"
+        if self.store.state in {State.ARCH_GATED, State.TESTS_VERIFIED, State.SMOKED, State.SHIPPED} or retry_ship:
+            smoke = self.smoke_gate(force=True, _ship_retry=True) if retry_ship else self.smoke_gate(force=True)
             if not smoke.get("smoked"):
                 return {"shipped": False, "reason": "fresh runtime smoke evidence required"}
         if self.store.state not in {State.SMOKED, State.SHIPPED}:

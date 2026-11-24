@@ -29,7 +29,8 @@ def run() -> None:
     p(f"{C['d']}  intent -> SSAT -> scaffold -> fill -> adversarial review -> ship{C['x']}\n")
 
     orchestrator = Orchestrator(root, "notifier")
-    orchestrator.store.set_state(State.ARCHITECTED)
+    orchestrator.expand()
+    orchestrator.approve_architecture(ssat)
     p(f"{C['c']}[1] architect{C['x']} - scaffolding signatures from architecture-as-code")
     orchestrator.architect(ssat)
     p(f"      {C['g']}OK{C['x']} 2 modules scaffolded with valid imports\n")

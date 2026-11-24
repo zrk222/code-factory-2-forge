@@ -5,7 +5,7 @@ import subprocess
 import yaml
 from pathlib import Path
 import pytest
-from forgeline.states import State, can_transition, IllegalTransition
+from forgeline.states import State, can_transition
 from forgeline.run_store import RunStore
 from forgeline.orchestrator import Orchestrator
 from forgeline.ssat import ScaffoldError, load_ssat, scaffold_from_ssat, check_erosion
@@ -30,7 +30,7 @@ def test_cli_reachable_architecture_and_fill_states(proj):
 
 def test_fill_blocks_unimplemented_scaffold(proj):
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.ARCHITECTED)
+    o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]
     o.architect(proj / "notifier.ssat.yaml")
     result = o.fill(proj / "notifier.ssat.yaml")
     assert result["filled"] is False
@@ -319,10 +319,11 @@ def test_existing_typescript_target_conflicts_without_force_and_preserves_hash(p
     target.write_text("export const preserved = true;\n", encoding="utf-8")
     before = hashlib.sha256(target.read_bytes()).hexdigest()
     orchestrator = Orchestrator(proj, "notifier")
-    orchestrator.store.set_state(State.ARCHITECTED)
+    orchestrator.store.set_state(State.EXPANDED)
     spec = proj / "typescript.ssat.yaml"
     spec.write_text(yaml.safe_dump(_typescript_ssat(["src/memory.ts"])), encoding="utf-8")
 
+    assert orchestrator.approve_architecture(spec)["approved"]
     from forgeline.cli import main
     with pytest.raises(SystemExit) as exited:
         main(["architect", "notifier", str(spec), "--root", str(proj)])
@@ -347,8 +348,9 @@ def test_existing_typescript_target_adopts_without_mutation_and_records_hash(pro
     spec = proj / "typescript.ssat.yaml"
     spec.write_text(yaml.safe_dump(_typescript_ssat(["src/memory.ts"])), encoding="utf-8")
     orchestrator = Orchestrator(proj, "notifier")
-    orchestrator.store.set_state(State.ARCHITECTED)
+    orchestrator.store.set_state(State.EXPANDED)
 
+    assert orchestrator.approve_architecture(spec)["approved"]
     result = orchestrator.architect(spec, adopt_existing=True)
 
     assert result["scaffolded"] is True
@@ -381,8 +383,9 @@ def test_adopt_existing_scaffolds_only_absent_targets(proj):
         encoding="utf-8",
     )
     orchestrator = Orchestrator(proj, "notifier")
-    orchestrator.store.set_state(State.ARCHITECTED)
+    orchestrator.store.set_state(State.EXPANDED)
 
+    assert orchestrator.approve_architecture(spec)["approved"]
     result = orchestrator.architect(spec, adopt_existing=True)
 
     assert [Path(item["path"]).name for item in result["report"]["adopted"]] == ["implemented.ts"]
@@ -402,8 +405,9 @@ def test_adopt_existing_refuses_signature_drift_without_mutation_or_transition(p
     spec = proj / "typescript.ssat.yaml"
     spec.write_text(yaml.safe_dump(_typescript_ssat(["src/memory.ts"])), encoding="utf-8")
     orchestrator = Orchestrator(proj, "notifier")
-    orchestrator.store.set_state(State.ARCHITECTED)
+    orchestrator.store.set_state(State.EXPANDED)
 
+    assert orchestrator.approve_architecture(spec)["approved"]
     result = orchestrator.architect(spec, adopt_existing=True)
 
     assert result["scaffolded"] is False
@@ -430,8 +434,9 @@ def test_adopt_existing_refuses_global_invariant_failure_without_adoption_receip
     spec = proj / "typescript.ssat.yaml"
     spec.write_text(yaml.safe_dump(spec_data), encoding="utf-8")
     orchestrator = Orchestrator(proj, "notifier")
-    orchestrator.store.set_state(State.ARCHITECTED)
+    orchestrator.store.set_state(State.EXPANDED)
 
+    assert orchestrator.approve_architecture(spec)["approved"]
     result = orchestrator.architect(spec, adopt_existing=True)
 
     assert result["scaffolded"] is False
@@ -736,7 +741,7 @@ def test_architect_illegal_transition_returns_structured_error_without_traceback
         "code": "E_ILLEGAL_TRANSITION",
         "current_state": "expanded",
         "requested_state": "scaffolded",
-        "next": "forge gate architected notifier --root .",
+        "next": "forge gate architected notifier <ssat.yaml> --root .",
     }
     assert not (proj / "slices" / "notifier" / "formatter.py").exists()
 
@@ -744,7 +749,7 @@ def test_architect_illegal_transition_returns_structured_error_without_traceback
 def test_status_and_missing_qa_contract_use_feature(proj, capsys):
     from forgeline.cli import main
     main(["status", "notifier", "--root", str(proj)])
-    assert json.loads(capsys.readouterr().out)["next"] == "forge expand notifier (draft use cases; signoff)"
+    assert json.loads(capsys.readouterr().out)["next_argv"] == ["forge", "expand", "notifier", "--root", str(proj)]
     with pytest.raises(SystemExit) as exited:
         main(["qa", "notifier", "--root", str(proj)])
     assert exited.value.code == 2
@@ -857,7 +862,7 @@ def test_review_reuses_one_invocation_local_erosion_result(proj, monkeypatch, dr
 
 def test_full_happy_path_intent_to_ship(proj):
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.EXPANDED); o.store.set_state(State.ARCHITECTED)
+    o.store.set_state(State.EXPANDED); o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]
     o.architect(proj/"notifier.ssat.yaml")
     assert o.store.state == State.SCAFFOLDED
     fill_good(proj)
@@ -873,7 +878,7 @@ def test_full_happy_path_intent_to_ship(proj):
 
 def test_refine_loop_records_skill_lessons(proj):
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.ARCHITECTED)
+    o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]
     o.architect(proj/"notifier.ssat.yaml")
     o.store.set_state(State.FILLED)  # but leave stubs unfilled -> review fails
     r = o.review(proj/"notifier.ssat.yaml")
@@ -896,7 +901,7 @@ def test_handoff_detects_decision_table(proj, monkeypatch):
     o = Orchestrator(proj, "notifier")
     r = o.handoff_decisions(spec)
     # returns None if specline not importable, else finds 2 rules — both acceptable
-    assert r is None or r["decision_rules"] == 2
+    assert r["error"]["code"] == "E_SPECLINE_REQUIRED" if r["state"] == "blocked" else r["decision_rules"] == 2
 
 def test_agent_wire_creates_entry_point_skill(proj):
     from forgeline.adapters import wire_agent
@@ -1184,7 +1189,7 @@ def test_invariant_regex_requires_a_bounded_symbol_scope(proj):
 
 def test_fill_attributes_invariant_not_stub(proj):
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.ARCHITECTED)
+    o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]
     o.architect(proj / "notifier.ssat.yaml")
     fill_good(proj)
     formatter = proj / "slices" / "notifier" / "formatter.py"
@@ -1251,7 +1256,7 @@ def test_review_escalates_and_promotes(proj):
     from forgeline.orchestrator import Orchestrator
     from forgeline.states import State
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.ARCHITECTED)
+    o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]
     o.architect(proj/"notifier.ssat.yaml")
     o.store.set_state(State.FILLED)  # stubs unfilled -> repeated failures
     r1 = o.review(proj/"notifier.ssat.yaml")
@@ -1265,7 +1270,7 @@ def test_review_receipt_carries_qa_grade(proj):
     from forgeline.states import State
     import json
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.ARCHITECTED); o.architect(proj/"notifier.ssat.yaml")
+    o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]; o.architect(proj/"notifier.ssat.yaml")
     fill_good(proj); o.store.set_state(State.FILLED)
     o.review(proj/"notifier.ssat.yaml")
     receipts = [json.loads(l) for l in (proj/".forge"/"notifier"/"receipts.jsonl").read_text().splitlines()]
@@ -1279,7 +1284,7 @@ def test_jev_review_packet_is_explicit_and_advisory(proj, profile):
     fill_good(proj); (proj / "evidence.txt").write_text("operator evidence", encoding="utf-8")
     material = {"profile": profile, "criteria": [{"id": "c1", "statement": "criterion met", "evidence_ids": ["e1"]}],
                 "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "operator_artifact"}], "omissions": []}
-    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    o = Orchestrator(proj, "notifier"); o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]; o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
     seen = []
     result = o.review(proj / "notifier.ssat.yaml", material=material,
                       reviewer=lambda packet: seen.append(packet) or {"status": "ADVISORY", "authority": "none", "release_decision": False})
@@ -1298,7 +1303,7 @@ def test_jev_optional_adapter_absence_stays_advisory_without_weakening_review(pr
     fill_good(proj)
     (proj / "evidence.txt").write_text("observed evidence", encoding="utf-8")
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.ARCHITECTED)
+    o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]
     o.architect(proj / "notifier.ssat.yaml")
     o.store.set_state(State.FILLED)
     unavailable = None if availability == "missing-module" else ModuleType("factoryline.jev_classifier")
@@ -1327,7 +1332,7 @@ def test_jev_stale_source_and_invalid_profile_fail_closed(proj):
     fill_good(proj); (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
     material = {"profile": "implementation", "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
                 "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}
-    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    o = Orchestrator(proj, "notifier"); o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]; o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
     src = proj / "slices/notifier/formatter.py"
     def mutate(packet):
         src.write_text("changed", encoding="utf-8")
@@ -1343,7 +1348,7 @@ def test_jev_stale_source_and_invalid_profile_fail_closed(proj):
 def test_jev_non_object_material_records_deterministic_failure(proj, material):
     fill_good(proj)
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.ARCHITECTED)
+    o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]
     o.architect(proj / "notifier.ssat.yaml")
     o.store.set_state(State.FILLED)
     calls = []
@@ -1379,7 +1384,7 @@ def test_jev_duplicate_claim_ids_and_reserved_context_evidence_fail_before_revie
     fill_good(proj)
     (proj / "evidence.txt").write_text("observed evidence", encoding="utf-8")
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.ARCHITECTED)
+    o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]
     o.architect(proj / "notifier.ssat.yaml")
     o.store.set_state(State.FILLED)
     calls = []
@@ -1401,7 +1406,7 @@ def test_jev_shared_adapter_roundtrip(proj, profile):
     fill_good(proj); (proj / "evidence.txt").write_text("observed evidence", encoding="utf-8")
     material = {"profile": profile, "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
                 "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}
-    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    o = Orchestrator(proj, "notifier"); o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]; o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
     def reviewer(packet):
         def transport(request):
             claim = {"claim_id": "c1", "label": "INSUFFICIENT_EVIDENCE",
@@ -1424,7 +1429,7 @@ def test_jev_missing_or_malformed_shared_response(proj, transport, expected):
     fill_good(proj); (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
     material = {"profile": "repair", "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
                 "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}
-    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    o = Orchestrator(proj, "notifier"); o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]; o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
     result = o.review(proj / "notifier.ssat.yaml", material=material,
                       reviewer=lambda packet: classifier.review_forgeline_packet(packet, transport=transport))
     assert result["reviewed"] is True and result["jev_review"]["status"] == expected
@@ -1438,7 +1443,7 @@ def test_jev_supported_assessment_cannot_promote_deterministic_failure(proj):
     (proj / "evidence.txt").write_text("evidence", encoding="utf-8")
     material = {"profile": "implementation", "criteria": [{"id": "c1", "statement": "criterion", "evidence_ids": ["e1"]}],
                 "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}
-    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    o = Orchestrator(proj, "notifier"); o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]; o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
     def reviewer(packet):
         def transport(request):
             claim = {"claim_id": "c1", "label": "SUPPORTED", "supporting_evidence_ids": ["e1"],
@@ -1478,7 +1483,7 @@ def test_jev_cli_accepts_only_local_explicit_response(proj, capsys, monkeypatch,
         "evidence": [{"id": "e1", "path": "evidence.txt", "kind": "artifact"}], "omissions": []}), encoding="utf-8")
     (proj / "response.json").write_text("{}", encoding="utf-8")
     responses = []
-    o = Orchestrator(proj, "notifier"); o.store.set_state(State.ARCHITECTED); o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
+    o = Orchestrator(proj, "notifier"); o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]; o.architect(proj / "notifier.ssat.yaml"); o.store.set_state(State.FILLED)
     main(["review", "notifier", str(proj / "notifier.ssat.yaml"), "--root", str(proj), "--jev-material", "material.json", "--jev-response", "response.json"])
     result = json.loads(capsys.readouterr().out)
     expected = "JEV_REVIEW_INVALID" if adapter_available else "FALLBACK"
@@ -1488,7 +1493,7 @@ def test_jev_cli_accepts_only_local_explicit_response(proj, capsys, monkeypatch,
 
 
 def test_arch_gate_receipt_has_attribution(proj):
-    o = _to_arch_gated(proj)
+    _to_arch_gated(proj)
     receipts = [json.loads(line) for line in
                 (proj / ".forge" / "notifier" / "receipts.jsonl").read_text().splitlines()]
     gate = [item for item in receipts if item.get("phase") == "arch_gate"][-1]
@@ -1535,7 +1540,7 @@ def test_ship_blocks_on_intent_gap(proj):
     from forgeline.orchestrator import Orchestrator
     from forgeline.states import State
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.ARCHITECTED); o.architect(proj/"notifier.ssat.yaml")
+    o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]; o.architect(proj/"notifier.ssat.yaml")
     fill_good(proj); o.store.set_state(State.FILLED)
     o.review(proj/"notifier.ssat.yaml"); o.arch_gate(proj/"notifier.ssat.yaml")
     # now plant an envelope with an unmet obligation
@@ -1551,7 +1556,7 @@ def test_ship_succeeds_when_intent_honored(proj, monkeypatch):
     from forgeline.orchestrator import Orchestrator
     from forgeline.states import State
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.ARCHITECTED); o.architect(proj/"notifier.ssat.yaml")
+    o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]; o.architect(proj/"notifier.ssat.yaml")
     fill_good(proj); o.store.set_state(State.FILLED)
     o.review(proj/"notifier.ssat.yaml"); o.arch_gate(proj/"notifier.ssat.yaml")
     write_smoke_manifest(proj); o.verify_tests(proj/"notifier.ssat.yaml"); o.smoke_gate()
@@ -1570,7 +1575,7 @@ def _to_arch_gated(proj):
     from forgeline.orchestrator import Orchestrator
     from forgeline.states import State
     o = Orchestrator(proj, "notifier")
-    o.store.set_state(State.ARCHITECTED); o.architect(proj/"notifier.ssat.yaml")
+    o.store.set_state(State.EXPANDED); assert o.approve_architecture()["approved"]; o.architect(proj/"notifier.ssat.yaml")
     fill_good(proj); o.store.set_state(State.FILLED)
     o.review(proj/"notifier.ssat.yaml"); o.arch_gate(proj/"notifier.ssat.yaml")
     return o
@@ -1809,7 +1814,6 @@ def test_smoke_gate_blocks_on_runtime_failure(proj):
     assert r["failures"]
 
 def test_ship_requires_smoke_gate(proj):
-    from forgeline.states import State
     o = _to_arch_gated(proj)
     # skip smoke, go straight to ship -> refused
     r = o.ship()
@@ -2220,3 +2224,220 @@ def test_python_security_alias_resolution_respects_scope_and_late_shadowing(proj
     assert any("shell=True" in item for item in security)
     assert report.security_score == 55
     assert any(name.endswith("codec.loads") for name in report.metrics["unknown_security_calls"])
+
+def test_expansion_and_ssat_approval_are_idempotent_and_bind_exact_bytes(proj):
+    o = Orchestrator(proj, "notifier")
+    assert o.expand()["expanded"]
+    assert o.expand()["reused"]
+    assert o.approve_architecture("missing.yaml")["error"]["code"] == "E_SSAT"
+    assert o.store.state == State.EXPANDED
+    spec = proj / "notifier.ssat.yaml"
+    first = o.approve_architecture(spec)
+    assert first["ssat_sha256"] == hashlib.sha256(spec.read_bytes()).hexdigest()
+    assert o.approve_architecture(spec)["reused"]
+    assert not o.expand()["expanded"]
+    spec.write_bytes(spec.read_bytes() + b"\n# changed\n")
+    assert o.architect(spec)["error"]["code"] == "E_SSAT_APPROVAL"
+    assert o.store.state == State.ARCHITECTED
+    assert not (proj / "slices").exists()
+
+
+def test_transition_recovers_committed_receipt_after_projection_error(proj, monkeypatch):
+    o = Orchestrator(proj, "notifier")
+    o.expand()
+    def fail_write(_):
+        raise OSError("simulated interruption")
+    monkeypatch.setattr(o.store, "_write", fail_write)
+    with pytest.raises(OSError, match="simulated interruption"):
+        o.approve_architecture()
+    reopened = Orchestrator(proj, "notifier")
+    assert reopened.store.state == State.ARCHITECTED
+    assert reopened.approve_architecture()["reused"]
+    assert reopened.store.latest_receipt("architecture_approval", strict=True)["approver"] == "human"
+
+
+def test_status_does_not_create_a_run_and_failed_smoke_exits_nonzero(proj, capsys):
+    from forgeline.cli import main
+    missing = proj / "missing"
+    with pytest.raises(SystemExit) as error:
+        main(["status", "notifier", "--root", str(missing)])
+    assert error.value.code == 1
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "E_WORKSPACE_NOT_FOUND"
+    assert not missing.exists()
+    main(["status", "notifier", "--root", str(proj)])
+    status = json.loads(capsys.readouterr().out)
+    assert status["state"] == "not_started"
+    assert not (proj / ".forge" / "notifier").exists()
+    with pytest.raises(SystemExit) as error:
+        main(["smoke", "notifier", "--root", str(proj)])
+    assert error.value.code == 1
+    assert json.loads(capsys.readouterr().out)["smoked"] is False
+
+
+def test_transition_retry_rolls_back_known_partial_receipt(proj, monkeypatch):
+    o = Orchestrator(proj, "notifier")
+    o.expand()
+    initial = o.store.receipts.read_bytes()
+    def interrupt(receipt):
+        with o.store.receipts.open("ab") as stream:
+            stream.write(o.store._line(receipt)[:17])
+        raise OSError("simulated partial write")
+    monkeypatch.setattr(o.store, "_append", interrupt)
+    with pytest.raises(OSError, match="simulated partial write"):
+        o.approve_architecture()
+    reopened = Orchestrator(proj, "notifier")
+    assert reopened.store.state == State.EXPANDED
+    assert reopened.store.latest_receipt("architecture_approval", strict=True) is None
+    assert reopened.approve_architecture()["approved"]
+    assert reopened.store.receipts.read_bytes().startswith(initial)
+    assert len(reopened.store.receipts.read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_approval_and_scaffold_serialize_the_same_contract(proj, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    import forgeline.orchestrator as module
+
+    o = Orchestrator(proj, "notifier")
+    o.expand()
+    spec = proj / "notifier.ssat.yaml"
+    assert o.approve_architecture(spec)["approved"]
+    replacement = proj / "replacement.ssat.yaml"
+    replacement.write_bytes(spec.read_bytes() + b"\n# replacement")
+    reached, release = Event(), Event()
+    real = module.scaffold_from_ssat
+
+    def pause(*args, **kwargs):
+        reached.set()
+        assert release.wait(10)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(module, "scaffold_from_ssat", pause)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(o.architect, spec)
+        assert reached.wait(10)
+        second = pool.submit(o.approve_architecture, replacement)
+        release.set()
+        assert first.result(timeout=20)["scaffolded"]
+        assert not second.result(timeout=20)["approved"]
+    records = o.store.latest_receipts(("architecture_approval", "scaffold"), strict=True)
+    assert records["architecture_approval"]["ssat_sha256"] == records["scaffold"]["ssat_sha256"]
+
+
+@pytest.mark.parametrize("method", ["fill", "review", "arch_gate", "verify_tests"])
+def test_later_gates_reject_alternate_or_changed_approved_contract(proj, method):
+    o = Orchestrator(proj, "notifier")
+    o.expand()
+    spec = proj / "notifier.ssat.yaml"
+    assert o.approve_architecture(spec)["approved"]
+    assert o.architect(spec)["scaffolded"]
+    raw = spec.read_bytes()
+    alternate = proj / "alternate.ssat.yaml"
+    alternate.write_bytes(raw)
+    before = o.store.state_path.read_bytes()
+    assert getattr(o, method)(alternate)["error"]["code"] == "E_SSAT_APPROVAL"
+    spec.write_bytes(raw + b"\n# changed")
+    assert getattr(o, method)(spec)["error"]["code"] == "E_SSAT_APPROVAL"
+    assert o.store.state_path.read_bytes() == before
+
+
+def test_handoff_preserves_old_pins_and_deduplicates_concurrent_exports(proj):
+    from concurrent.futures import ThreadPoolExecutor
+
+    pytest.importorskip("specline.handoff")
+    o = Orchestrator(proj, "notifier")
+    first = proj / "one.md"
+    second = proj / "two.md"
+    table = ("## Decision logic\n| # | if | then |\n|---|----|------|\n"
+             "| 1 | x == true | APPROVED: first |\n| 2 | else | DENIED: no |\n")
+    first.write_text(table, encoding="utf-8")
+    second.write_text(table.replace("APPROVED: first", "APPROVED: second"), encoding="utf-8")
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        repeated = list(pool.map(o.handoff_decisions, [first] * 3))
+    assert len({row["hsf_spec_sha256"] for row in repeated}) == 1
+    assert len(o.store.receipts.read_text(encoding="utf-8").splitlines()) == 1
+    changed = o.handoff_decisions(second)
+    assert changed["hsf_spec"] != repeated[0]["hsf_spec"]
+    for result in (repeated[0], changed):
+        assert hashlib.sha256(Path(result["hsf_spec"]).read_bytes()).hexdigest() == result["hsf_spec_sha256"]
+
+
+def test_status_smoke_retry_uses_current_verified_inputs(proj, monkeypatch, capsys):
+    from forgeline.cli import main
+    from forgeline.gates.runtime_smoke import SmokeReport
+
+    o = _to_arch_gated(proj)
+    write_smoke_manifest(proj)
+    assert o.verify_tests(proj / "notifier.ssat.yaml")["verified"]
+
+    def fail_once(*args):
+        report = SmokeReport()
+        report.add("runtime", False, "simulated transient failure")
+        return report
+
+    with monkeypatch.context() as patch:
+        patch.setattr(o, "_smoke_after_fresh_verify", fail_once)
+        assert not o.smoke_gate()["smoked"]
+    main(["status", "notifier", "--root", str(proj)])
+    status = json.loads(capsys.readouterr().out)
+    assert status["next_argv"][1] == "smoke"
+    main(status["next_argv"][1:])
+    assert json.loads(capsys.readouterr().out)["smoked"]
+    assert o.store.state == State.SMOKED
+
+
+def test_verify_and_smoke_phase_proof_recovers_with_the_state(proj, monkeypatch):
+    o = _to_arch_gated(proj)
+    write_smoke_manifest(proj)
+
+    def interrupt(_):
+        raise OSError("projection interrupted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(o.store, "_write", interrupt)
+        with pytest.raises(OSError, match="projection interrupted"):
+            o.verify_tests(proj / "notifier.ssat.yaml")
+    reopened = Orchestrator(proj, "notifier")
+    assert reopened.store.state == State.TESTS_VERIFIED
+    assert reopened.store.latest_receipt("verify_tests", strict=True)["verified"]
+    original = reopened.store._write
+
+    def interrupt_smoke(data):
+        if data["state"] == State.SMOKED.value:
+            interrupt(data)
+        original(data)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(reopened.store, "_write", interrupt_smoke)
+        with pytest.raises(OSError, match="projection interrupted"):
+            reopened.smoke_gate()
+    recovered = Orchestrator(proj, "notifier")
+    assert recovered.store.state == State.SMOKED
+    assert recovered.store.latest_receipt("smoke_gate", strict=True)["smoked"]
+
+
+def test_failed_fill_cannot_skip_to_later_gates(proj, capsys):
+    from forgeline.cli import main
+
+    o = Orchestrator(proj, "notifier")
+    o.expand()
+    spec = proj / "notifier.ssat.yaml"
+    assert o.approve_architecture(spec)["approved"]
+    assert o.architect(spec)["scaffolded"]
+    assert not o.fill(spec)["filled"]
+    fill_good(proj)
+    write_smoke_manifest(proj)
+    before = o.store.receipts.read_bytes()
+    for method in (o.review, o.arch_gate, o.verify_tests):
+        result = method(spec)
+        assert result["error"]["code"] == "E_PHASE_PREREQUISITE"
+        assert o.store.state == State.BLOCKED
+        assert o.store.receipts.read_bytes() == before
+    main(["status", "notifier", "--root", str(proj)])
+    status = json.loads(capsys.readouterr().out)
+    assert status["next_argv"][1] == "fill"
+    main(status["next_argv"][1:])
+    assert json.loads(capsys.readouterr().out)["filled"]
+    assert o.review(spec)["reviewed"]
+    assert o.arch_gate(spec)["passed"]
+    assert o.verify_tests(spec)["verified"]

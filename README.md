@@ -202,7 +202,7 @@ forge adopt <feature> --root .      inspect an existing repo and write a reviewa
 forge agent claude|codex            wire the entry-point skill
 forge status <feature>              current state + the ONE next action
 forge expand <feature>              draft use cases (→ human gate)
-forge gate architected <feature>    record explicit architecture approval
+forge gate architected <feature> <ssat>  approve specific SSAT bytes
 forge architect <feature> <ssat> --dry-run  show create/conflict/overwrite plan without writes
 forge architect <feature> <ssat>            generate new files; existing files fail closed
 forge architect <feature> <ssat> --adopt-existing  validate and receipt implemented files; scaffold only missing targets
@@ -217,10 +217,24 @@ forge qa <feature> --ssat <ssat> --strict  run scoped language-aware QA
 forge version --json                 print install and build provenance
 forge smoke <feature>                runtime behavior gate
 forge ship <feature>                seal it
-forge handoff <feature> <spec>      route decision tables to HSF
+forge handoff <feature> <spec>      export an exact HSF workflow and compile command
 forge lessons                       show the skill memory + promotable constraints
 forge demo                          the 60-second story
 ```
+
+### Resume or compile a decision workflow
+
+Use the command from `forge status <feature> --root <repo>` to resume. It reads
+the current run and receipts without creating a feature. A blocked gate exits
+nonzero and records the failed phase. Recovery resumes that phase or refreshes
+its earlier verification evidence when needed. Preview a draft SSAT with `forge architect --dry-run` after expanding,
+then approve the exact file before scaffolding. Legacy approvals without an
+SSAT binding require a fresh approval before scaffolding.
+
+`forge handoff <feature> <spec> --root <repo>` exports a digest-addressed HSF
+workflow. The output lists the exact compile command and the location of the
+required reviewed golden cases. Add `--compile` to run HSF locally when goldens
+are present. `--signing-key` passes an explicit operator Ed25519 key to HSF.
 
 ## Intent traceability through current acceptance evidence
 
