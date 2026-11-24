@@ -8,7 +8,7 @@ from io import BytesIO, TextIOWrapper
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import yaml
-from .states import State, can_transition, IllegalTransition
+from .states import State, can_transition, IllegalTransition, blocked_gate
 from .run_store import RunStore, _atomic_write
 from .ssat import ScaffoldError, parse_ssat, scaffold_from_ssat, check_erosion
 from .gates import judge_consistency, grumpy_review, skill_check
@@ -278,14 +278,22 @@ class Orchestrator:
                                phase="architecture_approval", approver="human", **binding)
         return {"approved": True, "state": State.ARCHITECTED.value, **binding}
 
+    def _phase_error(self, phase, *ready, also_retry=()):
+        run = self.store.load()
+        failed = blocked_gate(run)
+        if State(run["state"]) in ready or failed in (phase, *also_retry):
+            return None
+        return {"code": "E_PHASE_PREREQUISITE", "current_state": run["state"],
+                "failed_gate": failed, "message": "run the phase shown by forge status"}
+
     def fill(self, ssat_path: Path) -> dict:
         """Verify implemented bodies and advance the previously unreachable FILLED state."""
-        if self.store.state not in {State.SCAFFOLDED, State.BLOCKED}:
-            return {"filled": False, "reason": f"expected scaffolded or blocked, got {self.store.state.value}"}
         try:
             ssat = self._approved_contract(ssat_path)
         except ContractApprovalError as error:
             return {"filled": False, "error": {"code": "E_SSAT_APPROVAL", "message": str(error)}}
+        if phase_error := self._phase_error("fill", State.SCAFFOLDED):
+            return {"filled": False, "error": phase_error}
         ok, findings = judge_consistency(ssat, self.root)
         attr = _gate_attribution("fill", [
             ("implementation", ok, "all declared bodies implemented" if ok else " | ".join(findings),
@@ -294,7 +302,7 @@ class Orchestrator:
         self.store.receipt(phase="fill", passed=ok, findings=findings, attribution=attr)
         if not ok:
             if self.store.state != State.BLOCKED:
-                self._advance(State.BLOCKED, "fill verification failed")
+                self._advance(State.BLOCKED, "fill verification failed", failed_gate="fill")
             return {"filled": False, "findings": findings, "attribution": attr}
         self._advance(State.FILLED, "implemented bodies verified", attribution=attr)
         return {"filled": True, "attribution": attr}
@@ -319,7 +327,8 @@ class Orchestrator:
         except FileNotFoundError:
             current = State.INTENT
         preview_before_approval = dry_run and current == State.EXPANDED
-        if current not in {State.ARCHITECTED, State.BLOCKED} and not preview_before_approval:
+        retry_scaffold = current == State.BLOCKED and blocked_gate(self.store.load()) == "scaffold"
+        if current != State.ARCHITECTED and not (retry_scaffold or preview_before_approval):
             return {
                 "scaffolded": False,
                 "error": {
@@ -407,7 +416,8 @@ class Orchestrator:
         return packet, result
 
     def _review_success(self, attempt, qa, attribution):
-        self._advance(State.REVIEWED, f"review pass (attempt {attempt}, QA={qa.grade})")
+        if self.store.state != State.REVIEWED:
+            self._advance(State.REVIEWED, f"review pass (attempt {attempt}, QA={qa.grade})")
         return {"reviewed": True, "attempt": attempt, "qa_grade": qa.grade,
                 "qa_metrics": qa.metrics, "attribution": attribution}
 
@@ -418,7 +428,7 @@ class Orchestrator:
         kernel = LearningKernel(self.root)
         promoted = kernel.promote(lessons_for(self.root, "fill")); kernel.audit_effectiveness()
         if self.store.state != State.BLOCKED:
-            self._advance(State.BLOCKED, f"review failed (attempt {attempt}, QA={qa.grade})")
+            self._advance(State.BLOCKED, f"review failed (attempt {attempt}, QA={qa.grade})", failed_gate="review")
         escalation = ("normal" if attempt == 1 else
                       "elevated: fix ALL findings, not just blockers" if attempt == 2 else
                       "final: exhausted - human review required")
@@ -456,6 +466,8 @@ class Orchestrator:
             ssat = self._approved_contract(ssat_path)
         except ContractApprovalError as error:
             return {"reviewed": False, "error": {"code": "E_SSAT_APPROVAL", "message": str(error)}}
+        if phase_error := self._phase_error("review", State.FILLED, State.REVIEWED):
+            return {"reviewed": False, "error": phase_error}
         attempt = self.store.bump_attempt("review")
         kernel = LearningKernel(self.root)
         erosion = check_erosion(ssat, self.root)
@@ -495,6 +507,8 @@ class Orchestrator:
             ssat = self._approved_contract(ssat_path)
         except ContractApprovalError as error:
             return {"passed": False, "error": {"code": "E_SSAT_APPROVAL", "message": str(error)}}
+        if phase_error := self._phase_error("arch_gate", State.REVIEWED):
+            return {"passed": False, "error": phase_error}
         erosion = check_erosion(ssat, self.root)
         s_ok, s = skill_check(self.root, self.feature)
         arch_attr = _gate_attribution("arch_gate", [
@@ -509,17 +523,13 @@ class Orchestrator:
                                erosion=[f"{v.code} {v.message}" for v in erosion], skill=s,
                                attribution=arch_attr)
             if self.store.state != State.BLOCKED:
-                self._advance(State.BLOCKED, "arch gate failed")
+                self._advance(State.BLOCKED, "arch gate failed", failed_gate="arch_gate")
             return {"passed": False, "erosion": [f"{v.code} {v.message}" for v in erosion] + s,
                     "attribution": arch_attr}
-        # must currently be REVIEWED to legally gate
-        if self.store.state == State.BLOCKED:
-            self.store.set_state(State.REVIEWED, "recovered for arch gate")
         kernel = LearningKernel(self.root)
         eff = kernel.audit_effectiveness()
-        self._advance(State.ARCH_GATED, "architecture CI gate passed")
-        self.store.receipt(phase="arch_gate", passed=True, learning=eff,
-                           active_policy=kernel.policy_summary(), attribution=arch_attr)
+        self._advance(State.ARCH_GATED, "architecture CI gate passed", phase="arch_gate",
+                      passed=True, learning=eff, active_policy=kernel.policy_summary(), attribution=arch_attr)
         return {"passed": True, "learning": eff, "attribution": arch_attr}
 
     def handoff_decisions(self, spec_path: Path) -> dict:
@@ -575,7 +585,7 @@ class Orchestrator:
             "next_argv": ["hsf", "compile", str(manifest), "--expected-spec-file-sha256", digest, "--json"],
         }
 
-    def smoke_gate(self, *, force: bool = False) -> dict:
+    def smoke_gate(self, *, force: bool = False, _ship_retry=False) -> dict:
         """Runtime behavior verification — the behavior-by-inspection gate.
         Runs the built artifact against declared behavioral checks (smoke/<feature>.json)
         in isolated subprocesses. Blocks ship on any runtime failure. This is the
@@ -584,8 +594,8 @@ class Orchestrator:
         from .gates.runtime_smoke import smoke_report_lines
         run = self.store.load()
         state = State(run["state"])
-        retry_smoke = (state == State.BLOCKED and run["history"]
-                       and run["history"][-1]["note"] == "runtime smoke gate failed")
+        failed = blocked_gate(run)
+        retry_smoke = failed == "smoke_gate" or (_ship_retry and failed == "ship")
         if state not in {State.TESTS_VERIFIED, State.SMOKED, State.SHIPPED} and not retry_smoke:
             return {"smoked": False,
                     "reason": "tests not verified - run `forge verify-tests` first"}
@@ -627,7 +637,7 @@ class Orchestrator:
         if passed and state not in {State.SMOKED, State.SHIPPED}:
             self._advance(State.SMOKED, "runtime behavior verified", **receipt)
         elif not passed and state not in {State.BLOCKED, State.SHIPPED}:
-            self._advance(State.BLOCKED, "runtime smoke gate failed", **receipt)
+            self._advance(State.BLOCKED, "runtime smoke gate failed", failed_gate="smoke_gate", **receipt)
         else:
             self.store.receipt(**receipt)
         return result
@@ -645,7 +655,7 @@ class Orchestrator:
         if not passed:
             receipt["reason"] = "verification inputs changed during execution" if drifted else None
             if self.store.state not in {State.BLOCKED, State.SHIPPED}:
-                self._advance(State.BLOCKED, "reverse-classical test verification failed", **receipt)
+                self._advance(State.BLOCKED, "reverse-classical test verification failed", failed_gate="verify_tests", **receipt)
             else:
                 self.store.receipt(**receipt)
             return {"verified": False, "reason": "hollow smoke check(s) found", "attribution": attr}
@@ -690,6 +700,9 @@ class Orchestrator:
             return {"verified": False, "error": {"code": "E_SSAT_APPROVAL", "message": str(error)}}
         except (OSError, ValueError, TypeError) as error:
             return {"verified": False, "reason": f"invalid verification inputs: {error}"}
+        if phase_error := self._phase_error("verify_tests", State.ARCH_GATED, State.TESTS_VERIFIED, State.SMOKED,
+                                      State.SHIPPED, also_retry=("smoke_gate", "ship")):
+            return {"verified": False, "reason": "architecture gate not passed - run forge status", "error": phase_error}
         cached, previous = _verify_cache(self.store, self.store.state, fingerprint)
         if cached:
             return cached
@@ -729,7 +742,7 @@ class Orchestrator:
                                unverified_assumptions=trace.unverified_assumptions,
                                findings=trace.findings, attribution=attribution)
             if self.store.state not in {State.BLOCKED, State.SHIPPED}:
-                self._advance(State.BLOCKED, "intent-traceability gap")
+                self._advance(State.BLOCKED, "intent-traceability gap", failed_gate="ship")
             return {"shipped": False, "reason": "intent evidence is incomplete or invalid",
                     "unverified_assumptions": trace.unverified_assumptions,
                     "findings": trace.findings}, trace, attribution
@@ -778,8 +791,9 @@ class Orchestrator:
                 "obligations_met": obligations, "attribution": attribution}
 
     def ship(self, verify_intent: bool = True) -> dict:
-        if self.store.state in {State.ARCH_GATED, State.TESTS_VERIFIED, State.SMOKED, State.SHIPPED}:
-            smoke = self.smoke_gate(force=True)
+        retry_ship = blocked_gate(self.store.load()) == "ship"
+        if self.store.state in {State.ARCH_GATED, State.TESTS_VERIFIED, State.SMOKED, State.SHIPPED} or retry_ship:
+            smoke = self.smoke_gate(force=True, _ship_retry=True) if retry_ship else self.smoke_gate(force=True)
             if not smoke.get("smoked"):
                 return {"shipped": False, "reason": "fresh runtime smoke evidence required"}
         if self.store.state not in {State.SMOKED, State.SHIPPED}:

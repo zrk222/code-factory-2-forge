@@ -39,3 +39,39 @@ class IllegalTransition(RuntimeError):
 
 def can_transition(frm: State, to: State) -> bool:
     return to in TRANSITIONS.get(frm, set())
+
+
+_RESUME_TARGETS = {
+    "scaffold": {State.SCAFFOLDED},
+    "fill": {State.FILLED},
+    "review": {State.REVIEWED},
+    "arch_gate": {State.ARCH_GATED},
+    "verify_tests": {State.TESTS_VERIFIED},
+    "smoke_gate": {State.TESTS_VERIFIED, State.SMOKED},
+    "ship": {State.TESTS_VERIFIED, State.SMOKED},
+}
+_LEGACY_BLOCK_NOTES = {
+    "fill verification failed": "fill",
+    "arch gate failed": "arch_gate",
+    "reverse-classical test verification failed": "verify_tests",
+    "runtime smoke gate failed": "smoke_gate",
+    "intent-traceability gap": "ship",
+}
+
+
+def blocked_gate(run: dict) -> str | None:
+    if run["state"] != State.BLOCKED.value or not run["history"]:
+        return None
+    last = run["history"][-1]
+    gate = last.get("failed_gate")
+    if gate in _RESUME_TARGETS:
+        return gate
+    note = last.get("note", "")
+    if note.startswith("review failed ("):
+        return "review"
+    return _LEGACY_BLOCK_NOTES.get(note)
+
+
+def can_resume(run: dict, target: State) -> bool:
+    gate = blocked_gate(run)
+    return gate is not None and target in _RESUME_TARGETS[gate]

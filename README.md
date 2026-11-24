@@ -226,7 +226,8 @@ forge demo                          the 60-second story
 
 Use the command from `forge status <feature> --root <repo>` to resume. It reads
 the current run and receipts without creating a feature. A blocked gate exits
-nonzero. Preview a draft SSAT with `forge architect --dry-run` after expanding,
+nonzero and records the failed phase. Recovery resumes that phase or refreshes
+its earlier verification evidence when needed. Preview a draft SSAT with `forge architect --dry-run` after expanding,
 then approve the exact file before scaffolding. Legacy approvals without an
 SSAT binding require a fresh approval before scaffolding.
 

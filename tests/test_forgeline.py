@@ -2414,3 +2414,30 @@ def test_verify_and_smoke_phase_proof_recovers_with_the_state(proj, monkeypatch)
     recovered = Orchestrator(proj, "notifier")
     assert recovered.store.state == State.SMOKED
     assert recovered.store.latest_receipt("smoke_gate", strict=True)["smoked"]
+
+
+def test_failed_fill_cannot_skip_to_later_gates(proj, capsys):
+    from forgeline.cli import main
+
+    o = Orchestrator(proj, "notifier")
+    o.expand()
+    spec = proj / "notifier.ssat.yaml"
+    assert o.approve_architecture(spec)["approved"]
+    assert o.architect(spec)["scaffolded"]
+    assert not o.fill(spec)["filled"]
+    fill_good(proj)
+    write_smoke_manifest(proj)
+    before = o.store.receipts.read_bytes()
+    for method in (o.review, o.arch_gate, o.verify_tests):
+        result = method(spec)
+        assert result["error"]["code"] == "E_PHASE_PREREQUISITE"
+        assert o.store.state == State.BLOCKED
+        assert o.store.receipts.read_bytes() == before
+    main(["status", "notifier", "--root", str(proj)])
+    status = json.loads(capsys.readouterr().out)
+    assert status["next_argv"][1] == "fill"
+    main(status["next_argv"][1:])
+    assert json.loads(capsys.readouterr().out)["filled"]
+    assert o.review(spec)["reviewed"]
+    assert o.arch_gate(spec)["passed"]
+    assert o.verify_tests(spec)["verified"]

@@ -5,7 +5,7 @@ import json, datetime, hashlib, os, re, tempfile
 from pathlib import Path
 from collections.abc import Iterable
 from contextlib import contextmanager
-from .states import State, IllegalTransition, can_transition
+from .states import State, IllegalTransition, can_transition, can_resume
 
 def _now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -134,9 +134,12 @@ class RunStore:
         return State(self.load()["state"])
 
     @staticmethod
-    def _project(data, state, note, timestamp):
+    def _project(data, state, note, timestamp, *, failed_gate=None):
         data["state"] = state.value
-        data["history"].append({"ts": timestamp, "state": state.value, "note": note})
+        event = {"ts": timestamp, "state": state.value, "note": note}
+        if failed_gate is not None:
+            event["failed_gate"] = failed_gate
+        data["history"].append(event)
         return data
 
     @contextmanager
@@ -152,11 +155,14 @@ class RunStore:
     def _transition(self, expected: State, target: State, note: str, **fields):
         data = self.load()
         current = State(data["state"])
-        if current != expected or not (current == target or can_transition(current, target)):
+        legal = can_resume(data, target) if current == State.BLOCKED else (
+            current == target or can_transition(current, target)
+        )
+        if current != expected or not legal:
             raise IllegalTransition(f"{current.value} -> {target.value}; expected {expected.value}")
         receipt = self._sealed({"transition": f"{current.value}->{target.value}", **fields})
         offset = self.receipts.stat().st_size if self.receipts.exists() else 0
-        after = self._project(data, target, note, receipt["ts"])
+        after = self._project(data, target, note, receipt["ts"], failed_gate=fields.get("failed_gate"))
         _atomic_write(self.pending, json.dumps({"offset": offset, "receipt": receipt,
                                                 "state": after}).encode("utf-8"))
         self._append(receipt)

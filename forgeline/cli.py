@@ -2,13 +2,13 @@
 from __future__ import annotations
 import argparse, hashlib, json, os, shlex, subprocess, sys
 from pathlib import Path
-from .states import State, IllegalTransition
+from .states import State, IllegalTransition, blocked_gate
 from .run_store import RunStore
 from .orchestrator import Orchestrator, _NEXT_ACTION
 
 _PHASE_COMMAND = {
     "fill": "fill", "review": "review", "arch_gate": "arch-gate",
-    "verify_tests": "verify-tests", "smoke_gate": "smoke",
+    "verify_tests": "verify-tests", "smoke_gate": "smoke", "ship": "ship",
 }
 
 
@@ -29,7 +29,8 @@ def _status(root, feature):
     store = RunStore(root, feature, create=False)
     ssat = f"{feature}.ssat.yaml"
     try:
-        state = store.state
+        run = store.load()
+        state = State(run["state"])
     except FileNotFoundError:
         return {"feature": feature, "state": "not_started", "human_gate": False,
                 **_next(["forge", "expand", feature, "--root", str(root)])}
@@ -49,15 +50,16 @@ def _status(root, feature):
             result["blocker"] = {"code": "E_SSAT_APPROVAL", "message": "approve the current SSAT before scaffolding"}
             command = _NEXT_ACTION[State.EXPANDED].split()
     if state == State.BLOCKED:
-        failures = [row for phase, row in latest.items() if phase in _PHASE_COMMAND and row
-                    and (row.get("passed") is False or row.get("smoked") is False
-                         or row.get("verified") is False or row.get("findings"))]
-        if failures:
-            blocker = max(failures, key=lambda value: value["ts"])
-            phase = _PHASE_COMMAND[blocker["phase"]]
-            if phase == "smoke" and blocker.get("input_fingerprint") == "INVALID":
+        failed = blocked_gate(run)
+        if failed is None:
+            result["blocker"] = {"code": "E_UNKNOWN_BLOCKER", "message": "inspect the run's last failure"}
+        elif failed in _PHASE_COMMAND:
+            phase = _PHASE_COMMAND[failed]
+            blocker = latest.get(failed) or {"phase": failed}
+            smoke = latest.get("smoke_gate") or {}
+            if phase in {"smoke", "ship"} and smoke.get("input_fingerprint") == "INVALID":
                 phase = "verify-tests"
-            command = ["forge", phase, feature, *([] if phase == "smoke" else [ssat]), "--root", "."]
+            command = ["forge", phase, feature, *([] if phase in {"smoke", "ship"} else [ssat]), "--root", "."]
             result["blocker"] = {key: blocker[key] for key in ("phase", "findings", "reason", "h")
                                  if key in blocker}
     if command[:1] == ["forge"]:
