@@ -1,24 +1,70 @@
 """forge CLI — the state-machine driver."""
 from __future__ import annotations
-import argparse, json, sys
+import argparse, hashlib, json, os, shlex, subprocess, sys
 from pathlib import Path
-from .states import State, HUMAN_GATES
+from .states import State, IllegalTransition
 from .run_store import RunStore
-from .orchestrator import Orchestrator
+from .orchestrator import Orchestrator, _NEXT_ACTION
 
-NEXT_ACTION = {
-    State.INTENT: "forge expand <feature> (draft use cases; signoff)",
-    State.EXPANDED: "write SSAT; then: forge gate architected <feature>",
-    State.ARCHITECTED: "forge architect <feature> <ssat.yaml> (--adopt-existing to adopt)",
-    State.SCAFFOLDED: "implement bodies/tests; forge fill <feature> <ssat.yaml>",
-    State.FILLED: "forge review <feature> <ssat.yaml>",
-    State.REVIEWED: "forge arch-gate <feature> <ssat.yaml>",
-    State.ARCH_GATED: "forge verify-tests <feature> <ssat.yaml>",
-    State.TESTS_VERIFIED: "forge smoke <feature>",
-    State.SMOKED: "forge ship <feature>",
-    State.BLOCKED: "read lessons, fix, then re-run the failed gate",
-    State.SHIPPED: "done ✓",
+_PHASE_COMMAND = {
+    "fill": "fill", "review": "review", "arch_gate": "arch-gate",
+    "verify_tests": "verify-tests", "smoke_gate": "smoke",
 }
+
+
+def _emit_outcome(result, *, passed):
+    print(json.dumps(result, indent=2))
+    if not passed:
+        raise SystemExit(1)
+
+
+def _next(argv):
+    return {"next_argv": argv, "next": subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)}
+
+
+def _status(root, feature):
+    if not root.is_dir():
+        _emit_outcome({"feature": feature, "state": "unknown_workspace",
+                       "error": {"code": "E_WORKSPACE_NOT_FOUND", "message": str(root)}}, passed=False)
+    store = RunStore(root, feature, create=False)
+    ssat = f"{feature}.ssat.yaml"
+    try:
+        state = store.state
+    except FileNotFoundError:
+        return {"feature": feature, "state": "not_started", "human_gate": False,
+                **_next(["forge", "expand", feature, "--root", str(root)])}
+    latest = store.latest_receipts(("architecture_approval", *_PHASE_COMMAND), strict=True)
+    approval = latest["architecture_approval"]
+    if approval:
+        ssat = approval["ssat_path"]
+    result = {"feature": feature, "state": state.value, "human_gate": state == State.EXPANDED}
+    command = _NEXT_ACTION[state].split(" (", 1)[0].split()
+    if state == State.ARCHITECTED:
+        try:
+            current_sha = hashlib.sha256((root / ssat).read_bytes()).hexdigest()
+        except OSError:
+            current_sha = None
+        if not approval or current_sha != approval["ssat_sha256"]:
+            result["human_gate"] = True
+            result["blocker"] = {"code": "E_SSAT_APPROVAL", "message": "approve the current SSAT before scaffolding"}
+            command = _NEXT_ACTION[State.EXPANDED].split()
+    if state == State.BLOCKED:
+        failures = [row for phase, row in latest.items() if phase in _PHASE_COMMAND and row
+                    and (row.get("passed") is False or row.get("smoked") is False
+                         or row.get("verified") is False or row.get("findings"))]
+        if failures:
+            blocker = max(failures, key=lambda value: value["ts"])
+            phase = _PHASE_COMMAND[blocker["phase"]]
+            if phase == "smoke" and blocker.get("input_fingerprint") == "INVALID":
+                phase = "verify-tests"
+            command = ["forge", phase, feature, *([] if phase == "smoke" else [ssat]), "--root", "."]
+            result["blocker"] = {key: blocker[key] for key in ("phase", "findings", "reason", "h")
+                                 if key in blocker}
+    if command[:1] == ["forge"]:
+        result.update(_next([feature if arg == "<feature>" else ssat if arg == "<ssat.yaml>"
+                             else str(root) if arg == "." else arg for arg in command]))
+    return result
+
 
 def _emit_version(as_json: bool) -> None:
     from .provenance import provenance
@@ -46,7 +92,11 @@ def _review_command(root, args):
         def reviewer(packet):
             from factoryline.jev_classifier import review_forgeline_packet
             return review_forgeline_packet(packet, transport=(lambda request: response) if response is not None else None)
-    print(json.dumps(Orchestrator(root, args.feature).review(Path(args.ssat), material=material, reviewer=reviewer), indent=2))
+    obj = Orchestrator(root, args.feature)
+    approval = obj.store.latest_receipt("architecture_approval", strict=True)
+    path = root / (args.ssat or (approval or {}).get("ssat_path", f"{args.feature}.ssat.yaml"))
+    result = obj.review(path, material=material, reviewer=reviewer)
+    _emit_outcome(result, passed=result.get("reviewed") is True)
 
 
 def _command_parser(sp, name):
@@ -67,12 +117,15 @@ def _command_parser(sp, name):
     elif name == "verify-tests-ts":
         feature(); root(); sp.add_argument("--manifest")
     elif name == "gate":
-        sp.add_argument("phase", choices=["architected"]); feature(); root()
+        sp.add_argument("phase", choices=["architected"]); feature(); sp.add_argument("ssat", nargs="?"); root()
     elif name == "challenge":
         feature(); sp.add_argument("ssat"); root(); sp.add_argument("--out")
     elif name in {"agent", "handoff"}:
         sp.add_argument("name" if name == "agent" else "feature")
-        if name == "handoff": sp.add_argument("spec")
+        if name == "handoff":
+            sp.add_argument("spec")
+            sp.add_argument("--compile", action="store_true", help="run HSF locally with reviewed goldens")
+            sp.add_argument("--signing-key", help="operator Ed25519 key for --compile")
         root()
     elif name in {"lessons", "policy"}: root()
     elif name == "qa":
@@ -93,14 +146,28 @@ def _parser(argv):
 
 def _orchestrator_command(args, root):
     if args.cmd == "review": return _review_command(root, args)
-    obj = Orchestrator(root, args.feature)
-    calls = {"gate": lambda: obj.approve_architecture(), "architect": lambda: obj.architect(Path(args.ssat), force=args.force, adopt_existing=args.adopt_existing, dry_run=args.dry_run),
-             "fill": lambda: obj.fill(Path(args.ssat)),
-             "arch-gate": lambda: obj.arch_gate(Path(args.ssat)), "verify-tests": lambda: obj.verify_tests(Path(args.ssat)),
-             "smoke": lambda: obj.smoke_gate(), "ship": lambda: obj.ship()}
-    result = calls[args.cmd](); print(json.dumps(result, indent=2))
-    keys = {"gate": ("approved", False), "architect": ("scaffolded", False), "fill": ("filled", False)}
-    if args.cmd in keys and not result[keys[args.cmd][0]] and not (args.cmd == "architect" and args.dry_run): raise SystemExit(1)
+    preview = args.cmd == "architect" and args.dry_run
+    obj = Orchestrator(root, args.feature, create=not preview)
+    ssat_arg = getattr(args, "ssat", None)
+    approval = obj.store.latest_receipt("architecture_approval", strict=True)
+    ssat = root / (ssat_arg or (approval or {}).get("ssat_path", f"{args.feature}.ssat.yaml"))
+    calls = {
+        "gate": (lambda: obj.approve_architecture(ssat), "approved"),
+        "architect": (lambda: obj.architect(ssat, force=args.force, adopt_existing=args.adopt_existing,
+                                            dry_run=args.dry_run), "scaffolded"),
+        "fill": (lambda: obj.fill(ssat), "filled"),
+        "arch-gate": (lambda: obj.arch_gate(ssat), "passed"),
+        "verify-tests": (lambda: obj.verify_tests(ssat), "verified"),
+        "smoke": (obj.smoke_gate, "smoked"),
+        "ship": (obj.ship, "shipped"),
+    }
+    command, key = calls[args.cmd]
+    try:
+        result = command()
+    except (OSError, ValueError, IllegalTransition) as error:
+        result = {key: False, "error": {"code": "E_PHASE", "message": str(error)}}
+    preview = args.cmd == "architect" and args.dry_run and "error" not in result
+    _emit_outcome(result, passed=result.get(key) is True or preview)
 
 
 def _run_challenge(args, root):
@@ -138,12 +205,10 @@ def _run_basic(args, root):
         print("ForgeLine initialized. Next: forge agent claude|codex, then forge expand <feature>")
     elif cmd == "status":
         if not args.feature: raise SystemExit("feature required")
-        state = RunStore(root, args.feature).state
-        print(json.dumps({"feature": args.feature, "state": state.value, "human_gate": state in HUMAN_GATES,
-                          "next": NEXT_ACTION[state].replace("<feature>", args.feature)}, indent=2))
+        print(json.dumps(_status(root, args.feature), indent=2))
     elif cmd == "expand":
-        store = RunStore(root, args.feature); store.set_state(State.EXPANDED, "use cases drafted"); store.receipt(phase="expand", note="awaiting human signoff")
-        print(f"{args.feature}: EXPANDED — human confidence gate. After signoff: forge gate architected")
+        result = Orchestrator(root, args.feature).expand()
+        _emit_outcome(result, passed=result["expanded"])
     elif cmd == "adopt":
         from .adoption import adopt
         try: print(json.dumps(adopt(root, args.feature, out=Path(args.out) if args.out else None, force=args.force), indent=2))
@@ -159,8 +224,23 @@ def _run_basic(args, root):
         from .adapters import wire_agent
         print("wired:\n  " + "\n  ".join(str(command) for command in wire_agent(root, args.name)))
     elif cmd == "handoff":
+        if args.signing_key and not args.compile:
+            _emit_outcome({"state": "blocked", "error": {"code": "E_COMPILE_REQUIRED",
+                           "message": "--signing-key requires --compile"}}, passed=False)
         result = Orchestrator(root, args.feature).handoff_decisions(Path(args.spec))
-        print(json.dumps(result or {"decision_rules": 0, "note": "no decision table"}, indent=2))
+        if args.compile and result["state"] == "ready_to_compile":
+            command = result["next_argv"]
+            if args.signing_key:
+                command = [*command, "--signing-key", str(root / args.signing_key)]
+            completed = subprocess.run([sys.executable, "-m", "hsf", *command[1:]],
+                                       cwd=root, encoding="utf-8", capture_output=True, check=False)
+            try:
+                result["compile"] = json.loads(completed.stdout)
+            except json.JSONDecodeError:
+                result["compile"] = {"shipped": False, "error": completed.stderr.strip()}
+            result["state"] = "compiled" if completed.returncode == 0 and result["compile"].get("shipped") else "blocked"
+        passed = result["state"] == "compiled" if args.compile else result["state"] != "blocked"
+        _emit_outcome(result, passed=passed)
     elif cmd in {"demo", "demo-learning"}:
         from importlib import import_module
         import_module(f".{cmd.replace('-', '_')}", __package__).run()
@@ -179,10 +259,13 @@ def _run_basic(args, root):
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "--version": return _emit_version("--json" in argv)
-    args = _parser(argv); root = Path(getattr(args, "root", "."))
-    if args.cmd in {"gate", "architect", "fill", "review", "arch-gate", "verify-tests", "smoke", "ship"}:
-        return _orchestrator_command(args, root)
-    return _run_basic(args, root)
+    args = _parser(argv); root = Path(getattr(args, "root", ".")).resolve()
+    try:
+        if args.cmd in {"gate", "architect", "fill", "review", "arch-gate", "verify-tests", "smoke", "ship"}:
+            return _orchestrator_command(args, root)
+        return _run_basic(args, root)
+    except (OSError, ValueError, IllegalTransition) as error:
+        _emit_outcome({"state": "blocked", "error": {"code": "E_FORGE_WORKFLOW", "message": str(error)}}, passed=False)
 
 if __name__ == "__main__":
     main()
