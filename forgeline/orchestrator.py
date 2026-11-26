@@ -8,7 +8,7 @@ from io import BytesIO, TextIOWrapper
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import yaml
-from .states import State, can_transition, IllegalTransition, blocked_gate
+from .states import State, can_transition, IllegalTransition, blocked_gate, unproven_blocked, _NEXT_ACTION
 from .run_store import RunStore, _atomic_write
 from .ssat import ScaffoldError, parse_ssat, scaffold_from_ssat, check_erosion
 from .gates import judge_consistency, grumpy_review, skill_check
@@ -26,19 +26,6 @@ MAX_REFINE = 3
 class ContractApprovalError(ValueError):
     pass
 
-_NEXT_ACTION = {
-    State.INTENT: "forge expand <feature> --root .",
-    State.EXPANDED: "forge gate architected <feature> <ssat.yaml> --root .",
-    State.ARCHITECTED: "forge architect <feature> <ssat.yaml> --root . (add --adopt-existing for implemented targets)",
-    State.SCAFFOLDED: "forge fill <feature> <ssat.yaml> --root .",
-    State.FILLED: "forge review <feature> <ssat.yaml> --root .",
-    State.REVIEWED: "forge arch-gate <feature> <ssat.yaml> --root .",
-    State.ARCH_GATED: "forge verify-tests <feature> <ssat.yaml> --root .",
-    State.TESTS_VERIFIED: "forge smoke <feature> --root .",
-    State.SMOKED: "forge ship <feature> --root .",
-    State.BLOCKED: "inspect the failed receipt, repair it, then rerun its gate",
-    State.SHIPPED: "no further action; feature is shipped",
-}
 
 
 def _gate_attribution(stage: str, checks: list[tuple[str, bool, str, FailureClass]]) -> dict:
@@ -68,6 +55,23 @@ def _judge_failure_class(findings: list[str]) -> FailureClass:
         if any(finding.startswith(prefix) for finding in findings):
             return failure_class
     return FailureClass.INCONSISTENT_LOGIC
+
+
+# Variables that change what code runs or how it resolves; anything else (terminal ids, SSH sockets, CI metadata)
+# no longer makes verify-tests evidence stale. Smoke checks can declare more with an optional "env" list.
+FINGERPRINT_ENV = frozenset({"PATH", "PYTHONPATH", "PYTHONHASHSEED", "VIRTUAL_ENV", "NODE_PATH", "NODE_OPTIONS",
+                             "LD_PRELOAD", "LD_LIBRARY_PATH"})
+FINGERPRINT_ENV_PREFIXES = ("PYTHON", "DYLD_")
+
+
+def _fingerprint_env_names(declared: set[str]) -> list[str]:
+    present = {name for name in os.environ if name.startswith(FINGERPRINT_ENV_PREFIXES)}
+    return sorted(FINGERPRINT_ENV | present | declared)
+
+
+def _changed_components(current: dict, recorded: dict) -> list[str]:
+    keys = set(current) | set(recorded)
+    return sorted(key for key in keys if current.get(key) != recorded.get(key))
 
 
 def _verify_tests_fingerprint(root: Path, feature: str, ssat_path: Path) -> dict:
@@ -130,10 +134,14 @@ def _verify_tests_fingerprint(root: Path, feature: str, ssat_path: Path) -> dict
         [hashlib.sha256(executable.read_bytes()).hexdigest(), str(executable), sys.version],
         [hashlib.sha256(shell_path.read_bytes()).hexdigest(), str(shell_path)],
         [sys.platform, str(root)],
-        hashlib.sha256(json.dumps(sorted(os.environ.items())).encode()).hexdigest(),
     ]
     context = hashlib.sha256(json.dumps(context_parts).encode()).hexdigest()
     components["execution_context"] = context
+    components["fingerprint_schema"] = "2"
+    declared = {name for check in (checks or []) for name in check.env}
+    for name in _fingerprint_env_names(declared):
+        value = os.environ.get(name)
+        components[f"env:{name}"] = "UNSET" if value is None else hashlib.sha256(value.encode()).hexdigest()
     canonical = json.dumps(components, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return {"sha256": hashlib.sha256(canonical).hexdigest(), "components": components,
             "python_only": bool(checks) and all(check.kind == "python" for check in (checks or []))}
@@ -154,7 +162,12 @@ def _verified_inputs_from_receipt(
         raise ValueError("invalid SSAT receipt path")
     current = _verify_tests_fingerprint(root, feature, root / relative)
     if current["sha256"] != receipt.get("input_fingerprint"):
-        raise ValueError("verify-tests evidence is stale")
+        recorded = receipt.get("input_components") or {}
+        if recorded.get("fingerprint_schema") != current["components"].get("fingerprint_schema"):
+            raise ValueError("verify-tests evidence is stale: recorded by an older ForgeLine; re-run verify-tests once")
+        changed = _changed_components(current["components"], recorded)
+        detail = ", ".join(changed[:5]) + (f" (+{len(changed) - 5} more)" if len(changed) > 5 else "")
+        raise ValueError(f"verify-tests evidence is stale: changed {detail or 'fingerprint'}")
     return receipt, current
 
 
@@ -214,6 +227,25 @@ def _smoke_execution(store: RunStore, root: Path, feature: str, inputs: dict):
     return report
 
 
+def _export_staged(handoff_to_hsf, staging: Path, feature: str) -> bytes:
+    """The staged copy has no SpecLine gate history; ForgeLine pins and reports gating itself (see _spec_gated)."""
+    try:
+        return handoff_to_hsf(staging, feature, draft=True).read_bytes()
+    except TypeError:  # SpecLine < 0.6 has no draft flag and no gate check
+        return handoff_to_hsf(staging, feature).read_bytes()
+
+
+def _spec_gated(root: Path, feature: str, source: Path) -> bool | None:
+    """Whether SpecLine records a current spec gate for this exact file; None when SpecLine cannot say."""
+    try:
+        from specline.gates import spec_gate_current
+    except ImportError:
+        return None
+    if source != (root / "specs" / f"{feature}.md").resolve():
+        return None
+    return spec_gate_current(root, feature)
+
+
 class Orchestrator:
     def __init__(self, root: Path, feature: str, *, create=True):
         self.root = Path(root); self.feature = feature
@@ -229,11 +261,13 @@ class Orchestrator:
         current = self.store.state
         if current == State.EXPANDED:
             return {"expanded": True, "state": current.value, "reused": True}
-        if current != State.INTENT:
+        unproven = current == State.BLOCKED and unproven_blocked(self.store.load(), self.store.has_receipts())
+        if current != State.INTENT and not unproven:
             return {"expanded": False, "state": current.value,
                     "error": {"code": "E_ILLEGAL_TRANSITION", "message": "use status to resume this run"}}
+        note = "unproven blocked run restarted at expand" if unproven else "use cases drafted"
         try:
-            self.store.transition(State.INTENT, State.EXPANDED, "use cases drafted", phase="expand")
+            self.store.transition(current, State.EXPANDED, note, phase="expand")
         except IllegalTransition:
             if self.store.state != State.EXPANDED:
                 raise
@@ -556,7 +590,12 @@ class Orchestrator:
             rows = decision_rows(staged_spec)
             if not rows:
                 return {"state": "no_decisions", "decision_rules": 0}
-            yaml_bytes = handoff_to_hsf(staging, self.feature).read_bytes()
+            try:
+                yaml_bytes = _export_staged(handoff_to_hsf, staging, self.feature)
+            except SystemExit as error:  # SpecLine >= 0.6 reports E_HANDOFF_* instead of writing invalid YAML
+                code = getattr(error, "code", None)
+                return {"state": "blocked", "error": {"code": code if isinstance(code, str) and code.startswith("E_")
+                                                      else "E_HANDOFF_INVALID", "message": str(error)}}
         output = root / "handoff"
         if output.resolve() != output:
             return {"state": "blocked", "error": {"code": "E_HANDOFF_PATH", "message": "handoff directory must be local"}}
@@ -575,9 +614,14 @@ class Orchestrator:
             latest = self.store.latest_receipt("handoff", strict=True)
             if not latest or any(latest.get(key) != value for key, value in binding.items()):
                 self.store._append(self.store._sealed({"phase": "handoff", **binding}))
+        plain = output / f"{self.feature}_decisions.yaml"
+        supersedes = ({"supersedes": plain.relative_to(root).as_posix()}
+                      if plain.is_file() and not plain.is_symlink() and plain.read_bytes() == yaml_bytes else {})
         return {
             "state": "ready_to_compile" if goldens.is_file() else "needs_goldens",
             "decision_rules": len(rows),
+            "spec_gated": _spec_gated(root, self.feature, source),
+            **supersedes,
             "hsf_spec": str(manifest),
             "hsf_spec_sha256": digest,
             "goldens": str(goldens),

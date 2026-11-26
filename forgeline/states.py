@@ -32,6 +32,20 @@ TRANSITIONS = {
     State.SHIPPED:     set(),
 }
 
+_NEXT_ACTION = {
+    State.INTENT: "forge expand <feature> --root .",
+    State.EXPANDED: "forge gate architected <feature> <ssat.yaml> --root .",
+    State.ARCHITECTED: "forge architect <feature> <ssat.yaml> --root . (add --adopt-existing for implemented targets)",
+    State.SCAFFOLDED: "forge fill <feature> <ssat.yaml> --root .",
+    State.FILLED: "forge review <feature> <ssat.yaml> --root .",
+    State.REVIEWED: "forge arch-gate <feature> <ssat.yaml> --root .",
+    State.ARCH_GATED: "forge verify-tests <feature> <ssat.yaml> --root .",
+    State.TESTS_VERIFIED: "forge smoke <feature> --root .",
+    State.SMOKED: "forge ship <feature> --root .",
+    State.BLOCKED: "inspect the failed receipt, repair it, then rerun its gate",
+    State.SHIPPED: "no further action; feature is shipped",
+}
+
 HUMAN_GATES = {State.EXPANDED, State.ARCHITECTED}   # confidence gates requiring signoff
 
 class IllegalTransition(RuntimeError):
@@ -70,6 +84,12 @@ def blocked_gate(run: dict) -> str | None:
     if note.startswith("review failed ("):
         return "review"
     return _LEGACY_BLOCK_NOTES.get(note)
+
+
+def unproven_blocked(run: dict, has_receipts: bool) -> bool:
+    """A blocked run with no receipts and no known failed gate proves nothing (for example a state file another
+    tool wrote). It can restart at expand: there is no evidence to bypass."""
+    return run["state"] == State.BLOCKED.value and not has_receipts and blocked_gate(run) is None
 
 
 def can_resume(run: dict, target: State) -> bool:

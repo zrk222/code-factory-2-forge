@@ -5,7 +5,7 @@ import json, datetime, hashlib, os, re, tempfile
 from pathlib import Path
 from collections.abc import Iterable
 from contextlib import contextmanager
-from .states import State, IllegalTransition, can_transition, can_resume
+from .states import State, IllegalTransition, can_transition, can_resume, unproven_blocked
 
 def _now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -155,9 +155,8 @@ class RunStore:
     def _transition(self, expected: State, target: State, note: str, **fields):
         data = self.load()
         current = State(data["state"])
-        legal = can_resume(data, target) if current == State.BLOCKED else (
-            current == target or can_transition(current, target)
-        )
+        legal = (can_resume(data, target) or (target == State.EXPANDED and unproven_blocked(data, self.has_receipts())))\
+            if current == State.BLOCKED else (current == target or can_transition(current, target))
         if current != expected or not legal:
             raise IllegalTransition(f"{current.value} -> {target.value}; expected {expected.value}")
         receipt = self._sealed({"transition": f"{current.value}->{target.value}", **fields})
@@ -168,6 +167,9 @@ class RunStore:
         self._append(receipt)
         self._write(after)
         self.pending.unlink()
+
+    def has_receipts(self) -> bool:
+        return self.receipts.exists() and self.receipts.stat().st_size > 0
 
     def set_state(self, state: State, note: str = ""):
         with self._locked():

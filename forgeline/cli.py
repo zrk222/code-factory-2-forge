@@ -2,14 +2,59 @@
 from __future__ import annotations
 import argparse, hashlib, json, os, shlex, subprocess, sys
 from pathlib import Path
-from .states import State, IllegalTransition, blocked_gate
+from .states import State, IllegalTransition, blocked_gate, _NEXT_ACTION
 from .run_store import RunStore
-from .orchestrator import Orchestrator, _NEXT_ACTION
 
 _PHASE_COMMAND = {
     "fill": "fill", "review": "review", "arch_gate": "arch-gate",
     "verify_tests": "verify-tests", "smoke_gate": "smoke", "ship": "ship",
 }
+
+
+_HELP = {
+    "init": "scaffold the factory (.forge/ and skills/)",
+    "new": "write a starter SSAT and a smoke manifest that blocks until you edit it",
+    "advance": "run the next named step repeatedly until a human gate or blocker (max 8 steps)",
+    "adopt": "inspect an existing repo and write a reviewable baseline",
+    "status": "current state + the ONE next action (no feature: list features)",
+    "expand": "draft use cases (-> human gate)",
+    "gate": "approve specific SSAT bytes (gate architected <feature> <ssat>)",
+    "architect": "scaffold files from the approved SSAT (--dry-run, --adopt-existing, --force)",
+    "fill": "prove bodies are implemented; enter FILLED",
+    "review": "judge + grumpy adversary + architecture erosion (refine loop)",
+    "arch-gate": "architecture CI gate",
+    "verify-tests": "prove smoke checks fail on generated stubs",
+    "verify-tests-ts": "prove existing TypeScript tests fail on reviewed source mutants",
+    "challenge": "write a Factory Passport challenge receipt",
+    "smoke": "runtime behavior gate (--check: run the manifest without touching state)",
+    "ship": "seal the feature",
+    "handoff": "export an exact HSF workflow and compile command",
+    "agent": "wire the entry-point skill (claude|codex|<name>)",
+    "lessons": "show the skill memory + promotable constraints",
+    "policy": "show the learning policy summary",
+    "qa": "run scoped language-aware QA (--ssat <ssat> --strict)",
+    "optimize-pr": "score the current branch as a PR",
+    "demo": "the 60-second story",
+    "demo-learning": "the learning-loop demo",
+    "version": "print install and build provenance (--json)",
+}
+
+
+def _yaml_errors() -> tuple[type[BaseException], ...]:
+    """Evaluated only while an exception is being matched, so commands that never fail never import yaml."""
+    import yaml
+    return (yaml.YAMLError,)
+
+
+def _features(root):
+    rows = []
+    for path in sorted((root / ".forge").glob("*/state.json")):
+        try:
+            state = json.loads(path.read_bytes())["state"]
+        except (OSError, ValueError, KeyError, TypeError):
+            state = "unreadable"
+        rows.append({"feature": path.parent.name, "state": state})
+    return {"features": rows, **({} if rows else {"next": "forge expand <feature> --root ."})}
 
 
 def _emit_outcome(result, *, passed):
@@ -51,7 +96,12 @@ def _status(root, feature):
             command = _NEXT_ACTION[State.EXPANDED].split()
     if state == State.BLOCKED:
         failed = blocked_gate(run)
-        if failed is None:
+        if failed is None and not store.has_receipts():
+            result["blocker"] = {"code": "E_UNPROVEN_TARGET",
+                                 "message": "blocked run has no receipts (another tool wrote it); restart at expand",
+                                 "next": f"forge expand {feature} --root {root}"}
+            command = ["forge", "expand", feature, "--root", "."]
+        elif failed is None:
             result["blocker"] = {"code": "E_UNKNOWN_BLOCKER", "message": "inspect the run's last failure"}
         elif failed in _PHASE_COMMAND:
             phase = _PHASE_COMMAND[failed]
@@ -66,6 +116,54 @@ def _status(root, feature):
         result.update(_next([feature if arg == "<feature>" else ssat if arg == "<ssat.yaml>"
                              else str(root) if arg == "." else arg for arg in command]))
     return result
+
+
+ADVANCE_MAX_STEPS = 8
+
+
+def _run_captured(argv):
+    """Run one forge command in-process and return (rc, parsed JSON or text)."""
+    import contextlib, io
+    buffer = io.StringIO()
+    code = 0
+    with contextlib.redirect_stdout(buffer):
+        try:
+            main(argv)
+        except SystemExit as exit_:
+            code = exit_.code if isinstance(exit_.code, int) else (0 if exit_.code is None else 1)
+    text = buffer.getvalue()
+    try:
+        return code, json.loads(text)
+    except ValueError:
+        return code, text.strip()
+
+
+def _advance(root, feature, until=None):
+    """Run what `forge status` names, step by step, until a human gate, a blocker, `until`, or no progress.
+    Adds no authority: every command it runs is one status already printed."""
+    steps = []
+    for _ in range(ADVANCE_MAX_STEPS):
+        status = _status(root, feature)
+        if (status["state"] in {"shipped", until} or status.get("human_gate") or not status.get("next_argv")
+                or status.get("blocker", {}).get("code") == "E_UNKNOWN_BLOCKER"):
+            return status | {"steps": steps}, 0
+        argv = status["next_argv"]
+        code, output = _run_captured(argv[1:])
+        steps.append({"argv": argv, "rc": code})
+        after = _status(root, feature)
+        if code != 0:
+            return after | {"steps": steps, "failed": output}, 1
+        if after["state"] == status["state"] and after.get("next_argv") == argv:
+            return after | {"steps": steps, "stalled": True}, 1
+    return _status(root, feature) | {"steps": steps, "max_steps": ADVANCE_MAX_STEPS}, 0
+
+
+def _smoke_check(root, feature):
+    """Run the smoke manifest as a plain check (for harness gates): reads no run state and writes nothing."""
+    from .gates.runtime_smoke import runtime_smoke
+    report = runtime_smoke(root, feature)
+    _emit_outcome({"feature": feature, "checked": report.ok, "state_changed": False,
+                   "results": [vars(result) for result in report.results]}, passed=report.ok)
 
 
 def _emit_version(as_json: bool) -> None:
@@ -94,6 +192,7 @@ def _review_command(root, args):
         def reviewer(packet):
             from factoryline.jev_classifier import review_forgeline_packet
             return review_forgeline_packet(packet, transport=(lambda request: response) if response is not None else None)
+    from .orchestrator import Orchestrator
     obj = Orchestrator(root, args.feature)
     approval = obj.store.latest_receipt("architecture_approval", strict=True)
     path = root / (args.ssat or (approval or {}).get("ssat_path", f"{args.feature}.ssat.yaml"))
@@ -135,19 +234,27 @@ def _command_parser(sp, name):
     elif name == "optimize-pr":
         feature(True); root(); sp.add_argument("--base", default="main")
     elif name == "version": sp.add_argument("--json", action="store_true")
+    elif name == "smoke":
+        feature(); root()
+        sp.add_argument("--check", action="store_true", help="run the manifest only: no state change, no receipt")
+    elif name == "advance":
+        feature(); root(); sp.add_argument("--until", help="stop once this state is reached")
+    elif name == "new":
+        feature(); root()
     elif name not in {"demo", "demo-learning"}: feature(True); root()
 
 
 def _parser(argv):
     parser = argparse.ArgumentParser(prog="forge", description="ForgeLine CLI")
     sub = parser.add_subparsers(required=True, dest="cmd")
-    names = "init adopt status expand gate architect fill review arch-gate verify-tests verify-tests-ts challenge smoke ship handoff agent lessons policy qa optimize-pr demo demo-learning version".split()
-    for name in names: _command_parser(sub.add_parser(name), name)
+    names = "init new advance adopt status expand gate architect fill review arch-gate verify-tests verify-tests-ts challenge smoke ship handoff agent lessons policy qa optimize-pr demo demo-learning version".split()
+    for name in names: _command_parser(sub.add_parser(name, help=_HELP[name], description=_HELP[name]), name)
     return parser.parse_args(argv)
 
 
 def _orchestrator_command(args, root):
     if args.cmd == "review": return _review_command(root, args)
+    from .orchestrator import Orchestrator
     preview = args.cmd == "architect" and args.dry_run
     obj = Orchestrator(root, args.feature, create=not preview)
     ssat_arg = getattr(args, "ssat", None)
@@ -168,6 +275,8 @@ def _orchestrator_command(args, root):
         result = command()
     except (OSError, ValueError, IllegalTransition) as error:
         result = {key: False, "error": {"code": "E_PHASE", "message": str(error)}}
+    except _yaml_errors() as error:
+        result = {key: False, "error": {"code": "E_SSAT", "message": f"SSAT is not valid YAML: {error}"}}
     preview = args.cmd == "architect" and args.dry_run and "error" not in result
     _emit_outcome(result, passed=result.get(key) is True or preview)
 
@@ -205,10 +314,19 @@ def _run_basic(args, root):
     elif cmd == "init":
         (root / ".forge").mkdir(parents=True, exist_ok=True); (root / "skills").mkdir(exist_ok=True)
         print("ForgeLine initialized. Next: forge agent claude|codex, then forge expand <feature>")
+    elif cmd == "new":
+        from .starter import new_feature
+        try:
+            print(json.dumps(new_feature(root, args.feature), indent=2))
+        except FileExistsError as error:
+            _emit_outcome({"created": [], "error": {"code": "E_EXISTS", "message": str(error)}}, passed=False)
+    elif cmd == "advance":
+        result, code = _advance(root, args.feature, args.until)
+        _emit_outcome(result, passed=code == 0)
     elif cmd == "status":
-        if not args.feature: raise SystemExit("feature required")
-        print(json.dumps(_status(root, args.feature), indent=2))
+        print(json.dumps(_status(root, args.feature) if args.feature else _features(root), indent=2))
     elif cmd == "expand":
+        from .orchestrator import Orchestrator
         result = Orchestrator(root, args.feature).expand()
         _emit_outcome(result, passed=result["expanded"])
     elif cmd == "adopt":
@@ -229,6 +347,7 @@ def _run_basic(args, root):
         if args.signing_key and not args.compile:
             _emit_outcome({"state": "blocked", "error": {"code": "E_COMPILE_REQUIRED",
                            "message": "--signing-key requires --compile"}}, passed=False)
+        from .orchestrator import Orchestrator
         result = Orchestrator(root, args.feature).handoff_decisions(Path(args.spec))
         if args.compile and result["state"] == "ready_to_compile":
             command = result["next_argv"]
@@ -263,11 +382,16 @@ def main(argv=None):
     if argv and argv[0] == "--version": return _emit_version("--json" in argv)
     args = _parser(argv); root = Path(getattr(args, "root", ".")).resolve()
     try:
+        if args.cmd == "smoke" and args.check:
+            return _smoke_check(root, args.feature)
         if args.cmd in {"gate", "architect", "fill", "review", "arch-gate", "verify-tests", "smoke", "ship"}:
             return _orchestrator_command(args, root)
         return _run_basic(args, root)
     except (OSError, ValueError, IllegalTransition) as error:
         _emit_outcome({"state": "blocked", "error": {"code": "E_FORGE_WORKFLOW", "message": str(error)}}, passed=False)
+    except _yaml_errors() as error:
+        _emit_outcome({"state": "blocked", "error": {"code": "E_SSAT", "message": f"SSAT is not valid YAML: {error}"}},
+                      passed=False)
 
 if __name__ == "__main__":
     main()
