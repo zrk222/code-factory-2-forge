@@ -8,7 +8,7 @@ from io import BytesIO, TextIOWrapper
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import yaml
-from .states import State, can_transition, IllegalTransition, blocked_gate
+from .states import State, can_transition, IllegalTransition, blocked_gate, unproven_blocked
 from .run_store import RunStore, _atomic_write
 from .ssat import ScaffoldError, parse_ssat, scaffold_from_ssat, check_erosion
 from .gates import judge_consistency, grumpy_review, skill_check
@@ -255,11 +255,13 @@ class Orchestrator:
         current = self.store.state
         if current == State.EXPANDED:
             return {"expanded": True, "state": current.value, "reused": True}
-        if current != State.INTENT:
+        unproven = current == State.BLOCKED and unproven_blocked(self.store.load(), self.store.has_receipts())
+        if current != State.INTENT and not unproven:
             return {"expanded": False, "state": current.value,
                     "error": {"code": "E_ILLEGAL_TRANSITION", "message": "use status to resume this run"}}
+        note = "unproven blocked run restarted at expand" if unproven else "use cases drafted"
         try:
-            self.store.transition(State.INTENT, State.EXPANDED, "use cases drafted", phase="expand")
+            self.store.transition(current, State.EXPANDED, note, phase="expand")
         except IllegalTransition:
             if self.store.state != State.EXPANDED:
                 raise

@@ -20,9 +20,16 @@ def main():
     # try normal, then --break-system-packages (PEP 668 environments)
     r = run(sys.executable, "-m", "pip", "install", "-e", ".")
     if r.returncode != 0:
-        run(sys.executable, "-m", "pip", "install", "-e", ".", "--break-system-packages")
-    if shutil.which("forge") or True:
-        ok("forge CLI installed")
+        r = run(sys.executable, "-m", "pip", "install", "-e", ".", "--break-system-packages")
+    if r.returncode != 0:
+        sys.exit(f"{C['y']}pip install failed (exit {r.returncode}); see the pip output above.{C['x']}")
+    forge = shutil.which("forge")
+    if forge:
+        ok(f"forge CLI installed: {forge}")
+    else:
+        scripts = Path(sys.executable).parent
+        print(f"  {C['y']}!{C['x']} installed, but `forge` is not on PATH; add {scripts} to PATH "
+              f"or run `{sys.executable} -m forgeline.cli`")
     print()
     info("Next steps:")
     print(f"  {C['d']}forge init                 # scaffold the factory")

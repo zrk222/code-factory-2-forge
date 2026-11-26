@@ -12,6 +12,50 @@ _PHASE_COMMAND = {
 }
 
 
+_HELP = {
+    "init": "scaffold the factory (.forge/ and skills/)",
+    "adopt": "inspect an existing repo and write a reviewable baseline",
+    "status": "current state + the ONE next action (no feature: list features)",
+    "expand": "draft use cases (-> human gate)",
+    "gate": "approve specific SSAT bytes (gate architected <feature> <ssat>)",
+    "architect": "scaffold files from the approved SSAT (--dry-run, --adopt-existing, --force)",
+    "fill": "prove bodies are implemented; enter FILLED",
+    "review": "judge + grumpy adversary + architecture erosion (refine loop)",
+    "arch-gate": "architecture CI gate",
+    "verify-tests": "prove smoke checks fail on generated stubs",
+    "verify-tests-ts": "prove existing TypeScript tests fail on reviewed source mutants",
+    "challenge": "write a Factory Passport challenge receipt",
+    "smoke": "runtime behavior gate",
+    "ship": "seal the feature",
+    "handoff": "export an exact HSF workflow and compile command",
+    "agent": "wire the entry-point skill (claude|codex|<name>)",
+    "lessons": "show the skill memory + promotable constraints",
+    "policy": "show the learning policy summary",
+    "qa": "run scoped language-aware QA (--ssat <ssat> --strict)",
+    "optimize-pr": "score the current branch as a PR",
+    "demo": "the 60-second story",
+    "demo-learning": "the learning-loop demo",
+    "version": "print install and build provenance (--json)",
+}
+
+
+def _yaml_errors() -> tuple[type[BaseException], ...]:
+    """Evaluated only while an exception is being matched, so commands that never fail never import yaml."""
+    import yaml
+    return (yaml.YAMLError,)
+
+
+def _features(root):
+    rows = []
+    for path in sorted((root / ".forge").glob("*/state.json")):
+        try:
+            state = json.loads(path.read_bytes())["state"]
+        except (OSError, ValueError, KeyError, TypeError):
+            state = "unreadable"
+        rows.append({"feature": path.parent.name, "state": state})
+    return {"features": rows, **({} if rows else {"next": "forge expand <feature> --root ."})}
+
+
 def _emit_outcome(result, *, passed):
     print(json.dumps(result, indent=2))
     if not passed:
@@ -51,7 +95,12 @@ def _status(root, feature):
             command = _NEXT_ACTION[State.EXPANDED].split()
     if state == State.BLOCKED:
         failed = blocked_gate(run)
-        if failed is None:
+        if failed is None and not store.has_receipts():
+            result["blocker"] = {"code": "E_UNPROVEN_TARGET",
+                                 "message": "blocked run has no receipts (another tool wrote it); restart at expand",
+                                 "next": f"forge expand {feature} --root {root}"}
+            command = ["forge", "expand", feature, "--root", "."]
+        elif failed is None:
             result["blocker"] = {"code": "E_UNKNOWN_BLOCKER", "message": "inspect the run's last failure"}
         elif failed in _PHASE_COMMAND:
             phase = _PHASE_COMMAND[failed]
@@ -142,7 +191,7 @@ def _parser(argv):
     parser = argparse.ArgumentParser(prog="forge", description="ForgeLine CLI")
     sub = parser.add_subparsers(required=True, dest="cmd")
     names = "init adopt status expand gate architect fill review arch-gate verify-tests verify-tests-ts challenge smoke ship handoff agent lessons policy qa optimize-pr demo demo-learning version".split()
-    for name in names: _command_parser(sub.add_parser(name), name)
+    for name in names: _command_parser(sub.add_parser(name, help=_HELP[name], description=_HELP[name]), name)
     return parser.parse_args(argv)
 
 
@@ -168,6 +217,8 @@ def _orchestrator_command(args, root):
         result = command()
     except (OSError, ValueError, IllegalTransition) as error:
         result = {key: False, "error": {"code": "E_PHASE", "message": str(error)}}
+    except _yaml_errors() as error:
+        result = {key: False, "error": {"code": "E_SSAT", "message": f"SSAT is not valid YAML: {error}"}}
     preview = args.cmd == "architect" and args.dry_run and "error" not in result
     _emit_outcome(result, passed=result.get(key) is True or preview)
 
@@ -206,8 +257,7 @@ def _run_basic(args, root):
         (root / ".forge").mkdir(parents=True, exist_ok=True); (root / "skills").mkdir(exist_ok=True)
         print("ForgeLine initialized. Next: forge agent claude|codex, then forge expand <feature>")
     elif cmd == "status":
-        if not args.feature: raise SystemExit("feature required")
-        print(json.dumps(_status(root, args.feature), indent=2))
+        print(json.dumps(_status(root, args.feature) if args.feature else _features(root), indent=2))
     elif cmd == "expand":
         result = Orchestrator(root, args.feature).expand()
         _emit_outcome(result, passed=result["expanded"])
@@ -268,6 +318,9 @@ def main(argv=None):
         return _run_basic(args, root)
     except (OSError, ValueError, IllegalTransition) as error:
         _emit_outcome({"state": "blocked", "error": {"code": "E_FORGE_WORKFLOW", "message": str(error)}}, passed=False)
+    except _yaml_errors() as error:
+        _emit_outcome({"state": "blocked", "error": {"code": "E_SSAT", "message": f"SSAT is not valid YAML: {error}"}},
+                      passed=False)
 
 if __name__ == "__main__":
     main()

@@ -72,6 +72,12 @@ def blocked_gate(run: dict) -> str | None:
     return _LEGACY_BLOCK_NOTES.get(note)
 
 
+def unproven_blocked(run: dict, has_receipts: bool) -> bool:
+    """A blocked run with no receipts and no known failed gate proves nothing (for example a state file another
+    tool wrote). It can restart at expand: there is no evidence to bypass."""
+    return run["state"] == State.BLOCKED.value and not has_receipts and blocked_gate(run) is None
+
+
 def can_resume(run: dict, target: State) -> bool:
     gate = blocked_gate(run)
     return gate is not None and target in _RESUME_TARGETS[gate]
