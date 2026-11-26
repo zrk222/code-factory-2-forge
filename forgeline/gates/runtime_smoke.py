@@ -39,6 +39,7 @@ class SmokeCheck:
     expect_stdout: str | None = None   # substring that must appear
     timeout_s: int = 30
     must_fail_on_stub: bool = True
+    env: tuple[str, ...] = ()           # extra environment variables this check depends on
 
 
 @dataclass
@@ -102,6 +103,12 @@ def _read_manifest_text(path: Path) -> str | None:
     return path.read_text() if path.exists() else None
 
 
+def _env_names(value) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(name, str) and name for name in value):
+        raise ValueError("smoke check 'env' must be a list of variable names")
+    return tuple(value)
+
+
 def _load_manifest(root: Path, feature: str, *, read_text=_read_manifest_text) -> list[SmokeCheck] | None:
     """A smoke manifest is JSON at smoke/<feature>.json (or smoke/smoke.json).
     Each entry declares one behavioral check. Missing manifest -> None (fail-closed
@@ -123,6 +130,7 @@ def _load_manifest(root: Path, feature: str, *, read_text=_read_manifest_text) -
                     expect_stdout=entry.get("expect_stdout"),
                     timeout_s=entry.get("timeout_s", 30),
                     must_fail_on_stub=entry.get("must_fail_on_stub", True),
+                    env=_env_names(entry.get("env", [])),
                 ))
             return checks
     return None

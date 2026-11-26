@@ -1667,7 +1667,7 @@ def test_smoke_rejects_changed_input_since_verify_receipt(proj, monkeypatch, com
                 )
             )
         else:
-            monkeypatch.setenv("FORGELINE_FRESHNESS_PROBE", "changed")
+            monkeypatch.setenv("PYTHONHASHSEED", "12345")
 
     change()
 
@@ -1675,6 +1675,44 @@ def test_smoke_rejects_changed_input_since_verify_receipt(proj, monkeypatch, com
 
     assert result["smoked"] is False and o.store.state == State.BLOCKED
     assert "stale" in result["reason"].lower()
+
+
+def test_unrelated_environment_change_keeps_verify_evidence(proj, monkeypatch):
+    o = _to_tests_verified(proj)
+    monkeypatch.setenv("TERM_SESSION_ID", "a-new-terminal-tab")
+    monkeypatch.setenv("UNRELATED", "1")
+    assert o.smoke_gate()["smoked"] is True
+
+
+@pytest.mark.parametrize("change, named", [
+    ("pythonpath", "env:PYTHONPATH"), ("source", "source:slices/notifier/formatter.py"), ("declared", "env:NOTIFIER_URL")])
+def test_stale_verify_evidence_names_what_changed(proj, monkeypatch, change, named):
+    manifest = proj / "smoke" / "notifier.json"
+    if change == "declared":
+        o = _to_arch_gated(proj)
+        write_smoke_manifest(proj)
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["checks"][0]["env"] = ["NOTIFIER_URL"]
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        assert o.verify_tests(proj / "notifier.ssat.yaml")["verified"]
+        monkeypatch.setenv("NOTIFIER_URL", "http://elsewhere")
+    else:
+        o = _to_tests_verified(proj)
+        if change == "pythonpath":
+            monkeypatch.setenv("PYTHONPATH", "/somewhere/else")
+        else:
+            source = proj / "slices" / "notifier" / "formatter.py"
+            source.write_text(source.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
+    result = o.smoke_gate()
+    assert result["smoked"] is False and named in result["reason"]
+
+
+def test_receipt_values_never_store_raw_environment(proj, monkeypatch):
+    monkeypatch.setenv("PYTHONSECRETISH", "hunter2")
+    o = _to_tests_verified(proj)
+    receipt = o.store.latest_receipt("verify_tests", strict=True)
+    assert "hunter2" not in json.dumps(receipt)
+    assert receipt["input_components"]["env:PYTHONSECRETISH"] != "hunter2"
 
 
 def test_command_ship_is_fresh_and_repeat_ship_is_legal(proj, monkeypatch):

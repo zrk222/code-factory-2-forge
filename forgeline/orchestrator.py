@@ -70,6 +70,23 @@ def _judge_failure_class(findings: list[str]) -> FailureClass:
     return FailureClass.INCONSISTENT_LOGIC
 
 
+# Variables that change what code runs or how it resolves; anything else (terminal ids, SSH sockets, CI metadata)
+# no longer makes verify-tests evidence stale. Smoke checks can declare more with an optional "env" list.
+FINGERPRINT_ENV = frozenset({"PATH", "PYTHONPATH", "PYTHONHASHSEED", "VIRTUAL_ENV", "NODE_PATH", "NODE_OPTIONS",
+                             "LD_PRELOAD", "LD_LIBRARY_PATH"})
+FINGERPRINT_ENV_PREFIXES = ("PYTHON", "DYLD_")
+
+
+def _fingerprint_env_names(declared: set[str]) -> list[str]:
+    present = {name for name in os.environ if name.startswith(FINGERPRINT_ENV_PREFIXES)}
+    return sorted(FINGERPRINT_ENV | present | declared)
+
+
+def _changed_components(current: dict, recorded: dict) -> list[str]:
+    keys = set(current) | set(recorded)
+    return sorted(key for key in keys if current.get(key) != recorded.get(key))
+
+
 def _verify_tests_fingerprint(root: Path, feature: str, ssat_path: Path) -> dict:
     """Hash every verified input so stale reverse-classical receipts cannot pass."""
     from .source_scope import iter_source_files
@@ -130,10 +147,14 @@ def _verify_tests_fingerprint(root: Path, feature: str, ssat_path: Path) -> dict
         [hashlib.sha256(executable.read_bytes()).hexdigest(), str(executable), sys.version],
         [hashlib.sha256(shell_path.read_bytes()).hexdigest(), str(shell_path)],
         [sys.platform, str(root)],
-        hashlib.sha256(json.dumps(sorted(os.environ.items())).encode()).hexdigest(),
     ]
     context = hashlib.sha256(json.dumps(context_parts).encode()).hexdigest()
     components["execution_context"] = context
+    components["fingerprint_schema"] = "2"
+    declared = {name for check in (checks or []) for name in check.env}
+    for name in _fingerprint_env_names(declared):
+        value = os.environ.get(name)
+        components[f"env:{name}"] = "UNSET" if value is None else hashlib.sha256(value.encode()).hexdigest()
     canonical = json.dumps(components, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return {"sha256": hashlib.sha256(canonical).hexdigest(), "components": components,
             "python_only": bool(checks) and all(check.kind == "python" for check in (checks or []))}
@@ -154,7 +175,12 @@ def _verified_inputs_from_receipt(
         raise ValueError("invalid SSAT receipt path")
     current = _verify_tests_fingerprint(root, feature, root / relative)
     if current["sha256"] != receipt.get("input_fingerprint"):
-        raise ValueError("verify-tests evidence is stale")
+        recorded = receipt.get("input_components") or {}
+        if recorded.get("fingerprint_schema") != current["components"].get("fingerprint_schema"):
+            raise ValueError("verify-tests evidence is stale: recorded by an older ForgeLine; re-run verify-tests once")
+        changed = _changed_components(current["components"], recorded)
+        detail = ", ".join(changed[:5]) + (f" (+{len(changed) - 5} more)" if len(changed) > 5 else "")
+        raise ValueError(f"verify-tests evidence is stale: changed {detail or 'fingerprint'}")
     return receipt, current
 
 
