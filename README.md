@@ -198,9 +198,11 @@ agent never free-codes; it advances a state machine. That's the whole point.
 
 ```
 forge init                          scaffold the factory
+forge new <feature>                 starter SSAT + smoke manifest that blocks until you edit it
+forge advance <feature> [--until <state>]  run what status names until a human gate or failure (max 8 steps)
 forge adopt <feature> --root .      inspect an existing repo and write a reviewable baseline
 forge agent claude|codex            wire the entry-point skill
-forge status <feature>              current state + the ONE next action
+forge status [<feature>]            current state + the ONE next action (no feature: list features)
 forge expand <feature>              draft use cases (→ human gate)
 forge gate architected <feature> <ssat>  approve specific SSAT bytes
 forge architect <feature> <ssat> --dry-run  show create/conflict/overwrite plan without writes
@@ -216,11 +218,21 @@ forge challenge <feature> <ssat>     write a Factory Passport challenge receipt
 forge qa <feature> --ssat <ssat> --strict  run scoped language-aware QA
 forge version --json                 print install and build provenance
 forge smoke <feature>                runtime behavior gate
+forge smoke <feature> --check        run the smoke manifest only (no state change; for harness gates)
 forge ship <feature>                seal it
-forge handoff <feature> <spec>      export an exact HSF workflow and compile command
+forge handoff <feature> <spec>      export an exact HSF workflow and compile command (digest-addressed; it
+                                    reports `supersedes` when SpecLine's plain handoff file has the same bytes)
 forge lessons                       show the skill memory + promotable constraints
 forge demo                          the 60-second story
 ```
+
+### Environment in verify-tests evidence
+
+Verify-tests evidence binds the variables that change what code runs (`PATH`, `PYTHONPATH`, `PYTHONHASHSEED`,
+`VIRTUAL_ENV`, `NODE_PATH`, `NODE_OPTIONS`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, and any `PYTHON*` or `DYLD_*`
+variable), stored as hashes. A smoke check that depends on another variable lists it:
+`{"name": "...", "run": "...", "env": ["NOTIFIER_URL"]}`. When evidence goes stale, the message names what
+changed, for example `changed env:PYTHONPATH` or `changed source:slices/notifier/sender.py`.
 
 ### Resume or compile a decision workflow
 

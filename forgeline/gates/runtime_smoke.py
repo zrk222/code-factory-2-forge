@@ -120,6 +120,9 @@ def _load_manifest(root: Path, feature: str, *, read_text=_read_manifest_text) -
                 data = json.loads(text)
             except json.JSONDecodeError as e:
                 raise ValueError(f"smoke manifest {p} is not valid JSON: {e}")
+            if isinstance(data, dict) and "starter_placeholder" in data:
+                raise ValueError(f"smoke manifest {p.name} is the untouched `forge new` starter: replace its check "
+                                 "with a real assertion and delete starter_placeholder")
             checks = []
             for entry in data.get("checks", []):
                 checks.append(SmokeCheck(

@@ -13,6 +13,8 @@ _PHASE_COMMAND = {
 
 _HELP = {
     "init": "scaffold the factory (.forge/ and skills/)",
+    "new": "write a starter SSAT and a smoke manifest that blocks until you edit it",
+    "advance": "run the next named step repeatedly until a human gate or blocker (max 8 steps)",
     "adopt": "inspect an existing repo and write a reviewable baseline",
     "status": "current state + the ONE next action (no feature: list features)",
     "expand": "draft use cases (-> human gate)",
@@ -24,7 +26,7 @@ _HELP = {
     "verify-tests": "prove smoke checks fail on generated stubs",
     "verify-tests-ts": "prove existing TypeScript tests fail on reviewed source mutants",
     "challenge": "write a Factory Passport challenge receipt",
-    "smoke": "runtime behavior gate",
+    "smoke": "runtime behavior gate (--check: run the manifest without touching state)",
     "ship": "seal the feature",
     "handoff": "export an exact HSF workflow and compile command",
     "agent": "wire the entry-point skill (claude|codex|<name>)",
@@ -116,6 +118,54 @@ def _status(root, feature):
     return result
 
 
+ADVANCE_MAX_STEPS = 8
+
+
+def _run_captured(argv):
+    """Run one forge command in-process and return (rc, parsed JSON or text)."""
+    import contextlib, io
+    buffer = io.StringIO()
+    code = 0
+    with contextlib.redirect_stdout(buffer):
+        try:
+            main(argv)
+        except SystemExit as exit_:
+            code = exit_.code if isinstance(exit_.code, int) else (0 if exit_.code is None else 1)
+    text = buffer.getvalue()
+    try:
+        return code, json.loads(text)
+    except ValueError:
+        return code, text.strip()
+
+
+def _advance(root, feature, until=None):
+    """Run what `forge status` names, step by step, until a human gate, a blocker, `until`, or no progress.
+    Adds no authority: every command it runs is one status already printed."""
+    steps = []
+    for _ in range(ADVANCE_MAX_STEPS):
+        status = _status(root, feature)
+        if (status["state"] in {"shipped", until} or status.get("human_gate") or not status.get("next_argv")
+                or status.get("blocker", {}).get("code") == "E_UNKNOWN_BLOCKER"):
+            return status | {"steps": steps}, 0
+        argv = status["next_argv"]
+        code, output = _run_captured(argv[1:])
+        steps.append({"argv": argv, "rc": code})
+        after = _status(root, feature)
+        if code != 0:
+            return after | {"steps": steps, "failed": output}, 1
+        if after["state"] == status["state"] and after.get("next_argv") == argv:
+            return after | {"steps": steps, "stalled": True}, 1
+    return _status(root, feature) | {"steps": steps, "max_steps": ADVANCE_MAX_STEPS}, 0
+
+
+def _smoke_check(root, feature):
+    """Run the smoke manifest as a plain check (for harness gates): reads no run state and writes nothing."""
+    from .gates.runtime_smoke import runtime_smoke
+    report = runtime_smoke(root, feature)
+    _emit_outcome({"feature": feature, "checked": report.ok, "state_changed": False,
+                   "results": [vars(result) for result in report.results]}, passed=report.ok)
+
+
 def _emit_version(as_json: bool) -> None:
     from .provenance import provenance
     payload = provenance()
@@ -184,13 +234,20 @@ def _command_parser(sp, name):
     elif name == "optimize-pr":
         feature(True); root(); sp.add_argument("--base", default="main")
     elif name == "version": sp.add_argument("--json", action="store_true")
+    elif name == "smoke":
+        feature(); root()
+        sp.add_argument("--check", action="store_true", help="run the manifest only: no state change, no receipt")
+    elif name == "advance":
+        feature(); root(); sp.add_argument("--until", help="stop once this state is reached")
+    elif name == "new":
+        feature(); root()
     elif name not in {"demo", "demo-learning"}: feature(True); root()
 
 
 def _parser(argv):
     parser = argparse.ArgumentParser(prog="forge", description="ForgeLine CLI")
     sub = parser.add_subparsers(required=True, dest="cmd")
-    names = "init adopt status expand gate architect fill review arch-gate verify-tests verify-tests-ts challenge smoke ship handoff agent lessons policy qa optimize-pr demo demo-learning version".split()
+    names = "init new advance adopt status expand gate architect fill review arch-gate verify-tests verify-tests-ts challenge smoke ship handoff agent lessons policy qa optimize-pr demo demo-learning version".split()
     for name in names: _command_parser(sub.add_parser(name, help=_HELP[name], description=_HELP[name]), name)
     return parser.parse_args(argv)
 
@@ -257,6 +314,15 @@ def _run_basic(args, root):
     elif cmd == "init":
         (root / ".forge").mkdir(parents=True, exist_ok=True); (root / "skills").mkdir(exist_ok=True)
         print("ForgeLine initialized. Next: forge agent claude|codex, then forge expand <feature>")
+    elif cmd == "new":
+        from .starter import new_feature
+        try:
+            print(json.dumps(new_feature(root, args.feature), indent=2))
+        except FileExistsError as error:
+            _emit_outcome({"created": [], "error": {"code": "E_EXISTS", "message": str(error)}}, passed=False)
+    elif cmd == "advance":
+        result, code = _advance(root, args.feature, args.until)
+        _emit_outcome(result, passed=code == 0)
     elif cmd == "status":
         print(json.dumps(_status(root, args.feature) if args.feature else _features(root), indent=2))
     elif cmd == "expand":
@@ -316,6 +382,8 @@ def main(argv=None):
     if argv and argv[0] == "--version": return _emit_version("--json" in argv)
     args = _parser(argv); root = Path(getattr(args, "root", ".")).resolve()
     try:
+        if args.cmd == "smoke" and args.check:
+            return _smoke_check(root, args.feature)
         if args.cmd in {"gate", "architect", "fill", "review", "arch-gate", "verify-tests", "smoke", "ship"}:
             return _orchestrator_command(args, root)
         return _run_basic(args, root)

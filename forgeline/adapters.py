@@ -22,6 +22,8 @@ state machine:
    - ARCH_GATED: run `forge verify-tests <feature> <ssat.yaml>`.
    - TESTS_VERIFIED: run `forge smoke <feature>`.
    - SMOKED: run `forge ship <feature>`.
+   Once bodies are filled, `forge advance <feature>` runs the gate commands that
+   status names, in order, and stops at the first human gate or failure.
 3. Between phases your context resets. The disk + `forge status` are the truth.
 4. Decision logic (ordered business rules) is NEVER coded inline — it routes to
    the Harness Software Factory via the spec's decision table.
