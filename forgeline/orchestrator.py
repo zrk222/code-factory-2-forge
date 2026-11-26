@@ -8,7 +8,7 @@ from io import BytesIO, TextIOWrapper
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import yaml
-from .states import State, can_transition, IllegalTransition, blocked_gate, unproven_blocked
+from .states import State, can_transition, IllegalTransition, blocked_gate, unproven_blocked, _NEXT_ACTION
 from .run_store import RunStore, _atomic_write
 from .ssat import ScaffoldError, parse_ssat, scaffold_from_ssat, check_erosion
 from .gates import judge_consistency, grumpy_review, skill_check
@@ -26,19 +26,6 @@ MAX_REFINE = 3
 class ContractApprovalError(ValueError):
     pass
 
-_NEXT_ACTION = {
-    State.INTENT: "forge expand <feature> --root .",
-    State.EXPANDED: "forge gate architected <feature> <ssat.yaml> --root .",
-    State.ARCHITECTED: "forge architect <feature> <ssat.yaml> --root . (add --adopt-existing for implemented targets)",
-    State.SCAFFOLDED: "forge fill <feature> <ssat.yaml> --root .",
-    State.FILLED: "forge review <feature> <ssat.yaml> --root .",
-    State.REVIEWED: "forge arch-gate <feature> <ssat.yaml> --root .",
-    State.ARCH_GATED: "forge verify-tests <feature> <ssat.yaml> --root .",
-    State.TESTS_VERIFIED: "forge smoke <feature> --root .",
-    State.SMOKED: "forge ship <feature> --root .",
-    State.BLOCKED: "inspect the failed receipt, repair it, then rerun its gate",
-    State.SHIPPED: "no further action; feature is shipped",
-}
 
 
 def _gate_attribution(stage: str, checks: list[tuple[str, bool, str, FailureClass]]) -> dict:
@@ -238,6 +225,25 @@ def _smoke_execution(store: RunStore, root: Path, feature: str, inputs: dict):
         report = SmokeReport()
         report.add("evidence", False, f"smoke evidence invalid: {error}")
     return report
+
+
+def _export_staged(handoff_to_hsf, staging: Path, feature: str) -> bytes:
+    """The staged copy has no SpecLine gate history; ForgeLine pins and reports gating itself (see _spec_gated)."""
+    try:
+        return handoff_to_hsf(staging, feature, draft=True).read_bytes()
+    except TypeError:  # SpecLine < 0.6 has no draft flag and no gate check
+        return handoff_to_hsf(staging, feature).read_bytes()
+
+
+def _spec_gated(root: Path, feature: str, source: Path) -> bool | None:
+    """Whether SpecLine records a current spec gate for this exact file; None when SpecLine cannot say."""
+    try:
+        from specline.gates import spec_gate_current
+    except ImportError:
+        return None
+    if source != (root / "specs" / f"{feature}.md").resolve():
+        return None
+    return spec_gate_current(root, feature)
 
 
 class Orchestrator:
@@ -584,7 +590,12 @@ class Orchestrator:
             rows = decision_rows(staged_spec)
             if not rows:
                 return {"state": "no_decisions", "decision_rules": 0}
-            yaml_bytes = handoff_to_hsf(staging, self.feature).read_bytes()
+            try:
+                yaml_bytes = _export_staged(handoff_to_hsf, staging, self.feature)
+            except SystemExit as error:  # SpecLine >= 0.6 reports E_HANDOFF_* instead of writing invalid YAML
+                code = getattr(error, "code", None)
+                return {"state": "blocked", "error": {"code": code if isinstance(code, str) and code.startswith("E_")
+                                                      else "E_HANDOFF_INVALID", "message": str(error)}}
         output = root / "handoff"
         if output.resolve() != output:
             return {"state": "blocked", "error": {"code": "E_HANDOFF_PATH", "message": "handoff directory must be local"}}
@@ -603,9 +614,14 @@ class Orchestrator:
             latest = self.store.latest_receipt("handoff", strict=True)
             if not latest or any(latest.get(key) != value for key, value in binding.items()):
                 self.store._append(self.store._sealed({"phase": "handoff", **binding}))
+        plain = output / f"{self.feature}_decisions.yaml"
+        supersedes = ({"supersedes": plain.relative_to(root).as_posix()}
+                      if plain.is_file() and not plain.is_symlink() and plain.read_bytes() == yaml_bytes else {})
         return {
             "state": "ready_to_compile" if goldens.is_file() else "needs_goldens",
             "decision_rules": len(rows),
+            "spec_gated": _spec_gated(root, self.feature, source),
+            **supersedes,
             "hsf_spec": str(manifest),
             "hsf_spec_sha256": digest,
             "goldens": str(goldens),

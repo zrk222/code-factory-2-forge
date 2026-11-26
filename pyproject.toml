@@ -25,8 +25,5 @@ forge = "forgeline.cli:main"
 [tool.setuptools.packages.find]
 include = ["forgeline*"]
 
-[tool.setuptools.package-data]
-forgeline = ["../templates/**/*"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]

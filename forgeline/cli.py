@@ -2,9 +2,8 @@
 from __future__ import annotations
 import argparse, hashlib, json, os, shlex, subprocess, sys
 from pathlib import Path
-from .states import State, IllegalTransition, blocked_gate
+from .states import State, IllegalTransition, blocked_gate, _NEXT_ACTION
 from .run_store import RunStore
-from .orchestrator import Orchestrator, _NEXT_ACTION
 
 _PHASE_COMMAND = {
     "fill": "fill", "review": "review", "arch_gate": "arch-gate",
@@ -143,6 +142,7 @@ def _review_command(root, args):
         def reviewer(packet):
             from factoryline.jev_classifier import review_forgeline_packet
             return review_forgeline_packet(packet, transport=(lambda request: response) if response is not None else None)
+    from .orchestrator import Orchestrator
     obj = Orchestrator(root, args.feature)
     approval = obj.store.latest_receipt("architecture_approval", strict=True)
     path = root / (args.ssat or (approval or {}).get("ssat_path", f"{args.feature}.ssat.yaml"))
@@ -197,6 +197,7 @@ def _parser(argv):
 
 def _orchestrator_command(args, root):
     if args.cmd == "review": return _review_command(root, args)
+    from .orchestrator import Orchestrator
     preview = args.cmd == "architect" and args.dry_run
     obj = Orchestrator(root, args.feature, create=not preview)
     ssat_arg = getattr(args, "ssat", None)
@@ -259,6 +260,7 @@ def _run_basic(args, root):
     elif cmd == "status":
         print(json.dumps(_status(root, args.feature) if args.feature else _features(root), indent=2))
     elif cmd == "expand":
+        from .orchestrator import Orchestrator
         result = Orchestrator(root, args.feature).expand()
         _emit_outcome(result, passed=result["expanded"])
     elif cmd == "adopt":
@@ -279,6 +281,7 @@ def _run_basic(args, root):
         if args.signing_key and not args.compile:
             _emit_outcome({"state": "blocked", "error": {"code": "E_COMPILE_REQUIRED",
                            "message": "--signing-key requires --compile"}}, passed=False)
+        from .orchestrator import Orchestrator
         result = Orchestrator(root, args.feature).handoff_decisions(Path(args.spec))
         if args.compile and result["state"] == "ready_to_compile":
             command = result["next_argv"]
